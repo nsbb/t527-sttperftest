@@ -7,7 +7,7 @@ android {
     compileSdk 36
 
     defaultConfig {
-        applicationId "com.t527.vad_service"
+        applicationId "com.t527.sttperftest" // PERF-TEST-CHANGE: rename for play_sequence.py --stop-app + 실전 앱과 공존
         minSdk 33
         targetSdk 36
         versionCode 1

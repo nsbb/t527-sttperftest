@@ -4,6 +4,7 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.media.AudioFormat;
@@ -27,6 +28,11 @@ import com.t527.wav2vecdemo.conformer.ConformerDecoder;
 import com.t527.wav2vecdemo.conformer.SileroVad;
 import com.t527.wav2vecdemo.utils.DanjiServerSender;
 import com.t527.wav2vecdemo.utils.TtsReceiverServer;
+// PERF-TEST-CHANGE: 측정 인프라
+import com.t527.wav2vecdemo.perftest.PerfTestConfig;
+import com.t527.wav2vecdemo.perftest.WavWriter;
+import com.t527.wav2vecdemo.perftest.CsvLogger;
+import com.t527.wav2vecdemo.perftest.NextFileReceiver;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -78,6 +84,10 @@ public class VadPipelineService extends Service {
     private Handler mHandler;
     private Thread mPipelineThread;
     private TtsReceiverServer mTtsServer;
+    // PERF-TEST-CHANGE: CSV 로거 + 카운터 (이하 신규)
+    private CsvLogger mCsv;
+    private int mRecCounter = 0;
+    private String mSessionId = "";
 
     private static final int MAX_OVERLAY = 3;
     private static final int OVERLAY_BASE_Y = 300;   // 첫 메시지 Y offset (화면 하단 쪽)
@@ -131,7 +141,22 @@ public class VadPipelineService extends Service {
         Log.d(TAG, "Service onCreate");
         try { Runtime.getRuntime().exec(new String[]{"setprop", "vendor.audio.output.active.mic", "DMIC"}).waitFor(); } catch (Exception e) {}
         mHandler = new Handler(Looper.getMainLooper());
-        DanjiServerSender.init(this);
+        // PERF-TEST-CHANGE: 측정 모드에서는 단지서버 init/send 모두 skip (네트워크 latency 배제)
+        if (!PerfTestConfig.PERF_TEST_MODE) {
+            DanjiServerSender.init(this);
+        }
+        // PERF-TEST-CHANGE: CSV 로거 세션 시작
+        if (PerfTestConfig.PERF_TEST_MODE) {
+            PerfTestConfig.initPaths(getExternalFilesDir(null));
+            mSessionId = CsvLogger.newSessionId();
+            mCsv = new CsvLogger(PerfTestConfig.RESULTS_DIR, mSessionId);
+            Log.d(TAG, "PERF: csv=" + mCsv.getPath());
+            // NextFileReceiver 동적 등록 (Manifest 등록 + 동적 등록 둘 다 가능, 동적이 lifecycle 명확)
+            try {
+                android.content.IntentFilter f = new android.content.IntentFilter(PerfTestConfig.ACTION_NEXT_FILE);
+                registerReceiver(new NextFileReceiver(), f, Context.RECEIVER_EXPORTED);
+            } catch (Throwable t) { Log.e(TAG, "NextFileReceiver register fail", t); }
+        }
         mTone = new ToneGenerator(AudioManager.STREAM_MUSIC, 100);
 
         createNotificationChannel();
@@ -445,6 +470,23 @@ public class VadPipelineService extends Service {
         }
         Log.d(TAG, String.format("VAD: speech %.2fs (%d samples)", speechDuration, totalSamples));
 
+        // PERF-TEST-CHANGE: VAD 종료 직후 WAV 저장 (RTF 시작점 = saved_ms). STT 추론 전.
+        long savedMs = 0L;
+        String wavPath = "";
+        String mappedFile = "";
+        String mappedGt = "";
+        int mappedIndex = -1;
+        if (PerfTestConfig.PERF_TEST_MODE) {
+            mappedFile = NextFileReceiver.currentFile;
+            mappedGt = NextFileReceiver.currentGt;
+            mappedIndex = NextFileReceiver.currentIndex;
+            mRecCounter++;
+            wavPath = String.format(java.util.Locale.US,
+                    "%s/%s_%05d.wav", PerfTestConfig.RECORDINGS_DIR, mSessionId, mRecCounter);
+            WavWriter.writeMonoPcm16(wavPath, fullAudio, SR_MODEL);
+            savedMs = System.currentTimeMillis();
+        }
+
         // STT 슬라이딩 윈도우
         long tMelTotal = 0, tNpuTotal = 0;
         int WINDOW_SAMPLES = SR_MODEL * 301 / 100;
@@ -494,18 +536,31 @@ public class VadPipelineService extends Service {
 
         showToast(String.format("%s\n(mel %dms, npu %dms, %d chunks)", resultText, tMelTotal, tNpuTotal, numChunks));
 
-        // 단지서버로 STT 결과 전송
-        if (!text.isEmpty()) {
-            Log.d(TAG, "Sending STT result to danji server: " + resultText);
-            DanjiServerSender.send(resultText, (success, message) -> {
-                if (success) {
-                    Log.d(TAG, "Server send OK: " + message);
-                    showToast("서버 전송 완료");
-                } else {
-                    Log.e(TAG, "Server send FAIL: " + message);
-                    showToast("서버 전송 실패: " + message);
-                }
-            });
+        // PERF-TEST-CHANGE: CSV append (finished_ms = STT 완료 직후) + 단지서버 호출 가드
+        if (PerfTestConfig.PERF_TEST_MODE) {
+            long finishedMs = System.currentTimeMillis();
+            long durationMs = finishedMs - savedMs;
+            if (mCsv != null) {
+                mCsv.append(mappedFile, mappedGt, text,
+                        durationMs, savedMs, finishedMs,
+                        speechDuration, tMelTotal, tNpuTotal, numChunks);
+            }
+            Log.d(TAG, String.format("PERF: idx=%d wav=%s text=[%s] dur=%dms speech=%.2fs",
+                    mappedIndex, wavPath, text, durationMs, speechDuration));
+        } else {
+            // 실전 모드: 단지서버로 STT 결과 전송
+            if (!text.isEmpty()) {
+                Log.d(TAG, "Sending STT result to danji server: " + resultText);
+                DanjiServerSender.send(resultText, (success, message) -> {
+                    if (success) {
+                        Log.d(TAG, "Server send OK: " + message);
+                        showToast("서버 전송 완료");
+                    } else {
+                        Log.e(TAG, "Server send FAIL: " + message);
+                        showToast("서버 전송 실패: " + message);
+                    }
+                });
+            }
         }
     }
 
@@ -538,6 +593,11 @@ public class VadPipelineService extends Service {
     }
 
     private void showToast(String msg) {
+        // PERF-TEST-CHANGE: 측정 모드에서는 view 단(overlay/Toast) 모두 skip — logcat만 기록
+        if (PerfTestConfig.PERF_TEST_MODE) {
+            Log.d(TAG, "showToast(suppressed): " + msg);
+            return;
+        }
         mHandler.post(() -> {
             Log.d(TAG, "showToast: " + msg);
             try {

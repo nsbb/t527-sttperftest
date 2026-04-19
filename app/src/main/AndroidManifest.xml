@@ -58,5 +58,14 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- PERF-TEST-CHANGE: play_sequence.py 가 보내는 다음 파일명 broadcast 수신 -->
+        <receiver
+            android:name="com.t527.wav2vecdemo.perftest.NextFileReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.t527.sttperftest.NEXT" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
