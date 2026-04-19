@@ -1,0 +1,41 @@
+{
+    "Inputs": {
+        "audio_signal_1507": {
+            "name": "audio_signal",
+            "shape": [
+                1,
+                80,
+                301
+            ],
+            "format": "nchw",
+            "quantizer": "asymmetric_affine",
+            "quantize": {
+                "qtype": "u8",
+                "max_value": 4.41508674621582,
+                "min_value": -2.1845555305480957,
+                "scale": 0.025880949571728706,
+                "zero_point": 84
+            }
+        }
+    },
+    "Outputs": {
+        "attach_LogSoftmax_/LogSoftmax/out0_0": {
+            "name": "attach_LogSoftmax_/LogSoftmax/out0",
+            "shape": [
+                1,
+                76,
+                2049
+            ],
+            "format": "nchw",
+            "quantizer": "asymmetric_affine",
+            "quantize": {
+                "qtype": "u8",
+                "max_value": 0.0,
+                "min_value": -62.38304901123047,
+                "scale": 0.24463941156864166,
+                "zero_point": 255
+            }
+        }
+    },
+    "Recurrent_connections": {}
+}

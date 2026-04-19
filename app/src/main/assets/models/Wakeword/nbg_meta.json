@@ -1,0 +1,41 @@
+{
+    "Inputs": {
+        "input_157": {
+            "name": "input",
+            "shape": [
+                1,
+                1,
+                40,
+                151
+            ],
+            "format": "nchw",
+            "quantizer": "asymmetric_affine",
+            "quantize": {
+                "qtype": "u8",
+                "max_value": 7.085766792297363,
+                "min_value": -12.19487190246582,
+                "scale": 0.07561035454273224,
+                "zero_point": 161
+            }
+        }
+    },
+    "Outputs": {
+        "attach_Reshape_/backbone/Reshape/out0_0": {
+            "name": "attach_Reshape_/backbone/Reshape/out0",
+            "shape": [
+                1,
+                2
+            ],
+            "format": "nchw",
+            "quantizer": "asymmetric_affine",
+            "quantize": {
+                "qtype": "u8",
+                "max_value": 1.0789376497268677,
+                "min_value": -1.078938364982605,
+                "scale": 0.008462258614599705,
+                "zero_point": 128
+            }
+        }
+    },
+    "Recurrent_connections": {}
+}

@@ -1,0 +1,26 @@
+cc_library_shared {
+    name: "libawwav2vec",
+
+    srcs: [
+        "wav2vec/awwav2vecsdk.c",
+        "wav2vec/wav2vec_postprocess.cpp",
+    ],
+    
+    cflags: ["-O2", "-fPIC"],
+    
+    // 64비트만 빌드
+    compile_multilib: "64",
+    
+    shared_libs: [
+        "libawnn.viplite",
+        "liblog",
+    ],
+    
+    header_libs: [
+        "jni_headers"
+    ],
+    
+    static_libs: [
+        "libawutils",
+    ],
+}
