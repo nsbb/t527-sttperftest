@@ -108,6 +108,25 @@ void conformer_mel_cleanup(void) {
     s_initialized = 0;
 }
 
+int conformer_mel_frame_count(int audio_len) {
+    if (audio_len <= 0) return 0;
+    int padded_len = audio_len + 2 * PAD_LEN;
+    if (padded_len < FFT_SIZE) return 0;
+    return (padded_len - FFT_SIZE) / HOP_LEN + 1;
+}
+
+int conformer_mel_chunk_count(int n_frames) {
+    if (n_frames <= 0) return 0;
+    int chunks = 0;
+    int start = 0;
+    while (start < n_frames) {
+        chunks++;
+        if (start + TIME_FRAMES >= n_frames) break;
+        start += CONF_MEL_STRIDE_FRAMES;
+    }
+    return chunks;
+}
+
 int conformer_mel_compute(
     const float* audio, int audio_len,
     uint8_t* out_mel,
@@ -199,8 +218,8 @@ int conformer_mel_compute(
             if (t < n_frames) {
                 mel_float[m][t] = (mel_float[m][t] - mean) * inv_std;
             } else {
-                // Zero-pad frames: normalize the zero value too
-                mel_float[m][t] = (0.0f - mean) * inv_std;
+                // NeMo pads fixed windows after per-feature normalization.
+                mel_float[m][t] = 0.0f;
             }
         }
     }
@@ -220,4 +239,114 @@ int conformer_mel_compute(
 
     free(padded);
     return n_frames;
+}
+
+int conformer_mel_compute_chunks(
+    const float* audio, int audio_len,
+    uint8_t* out_chunks,
+    float scale, int zero_point
+) {
+    if (!s_initialized) conformer_mel_init();
+    if (!audio || audio_len <= 0 || !out_chunks) return 0;
+
+    // Step 1: Center padding (reflect mode), matching torch.stft center=True.
+    int padded_len = audio_len + 2 * PAD_LEN;
+    float* padded = (float*)calloc(padded_len, sizeof(float));
+    if (!padded) return 0;
+
+    for (int i = 0; i < PAD_LEN; i++) {
+        int idx = PAD_LEN - i;
+        if (idx >= audio_len) idx = audio_len - 1;
+        padded[i] = audio[idx];
+    }
+    memcpy(padded + PAD_LEN, audio, audio_len * sizeof(float));
+    for (int i = 0; i < PAD_LEN; i++) {
+        int idx = audio_len - 2 - i;
+        if (idx < 0) idx = 0;
+        padded[PAD_LEN + audio_len + i] = audio[idx];
+    }
+
+    int n_frames = conformer_mel_frame_count(audio_len);
+    int num_chunks = conformer_mel_chunk_count(n_frames);
+    if (n_frames <= 0 || num_chunks <= 0) {
+        free(padded);
+        return 0;
+    }
+
+    float* mel_float = (float*)calloc((size_t)N_MELS * n_frames, sizeof(float));
+    if (!mel_float) {
+        free(padded);
+        return 0;
+    }
+
+    kiss_fft_cpx fft_in[FFT_SIZE];
+    kiss_fft_cpx fft_out[FFT_SIZE];
+    float power[FFT_BINS];
+
+    for (int t = 0; t < n_frames; t++) {
+        int start = t * HOP_LEN;
+        memset(fft_in, 0, sizeof(fft_in));
+        for (int i = 0; i < WIN_LEN && (start + i) < padded_len; i++) {
+            fft_in[i].r = padded[start + i] * s_hann_window[i];
+            fft_in[i].i = 0.0f;
+        }
+
+        kiss_fft(s_fft_cfg, fft_in, fft_out);
+
+        for (int k = 0; k < FFT_BINS; k++) {
+            power[k] = fft_out[k].r * fft_out[k].r + fft_out[k].i * fft_out[k].i;
+        }
+
+        for (int m = 0; m < N_MELS; m++) {
+            float sum = 0.0f;
+            for (int k = 0; k < FFT_BINS; k++) {
+                sum += s_mel_filterbank[m][k] * power[k];
+            }
+            mel_float[m * n_frames + t] = logf(sum + CONF_MEL_LOG_GUARD);
+        }
+    }
+
+    // NeMo normalize="per_feature": normalize each mel bin over full utterance frames.
+    for (int m = 0; m < N_MELS; m++) {
+        float mean = 0.0f;
+        for (int t = 0; t < n_frames; t++) mean += mel_float[m * n_frames + t];
+        mean /= (float)n_frames;
+
+        float var = 0.0f;
+        for (int t = 0; t < n_frames; t++) {
+            float diff = mel_float[m * n_frames + t] - mean;
+            var += diff * diff;
+        }
+        float inv_std = 1.0f / (sqrtf(var / (float)n_frames) + 1e-5f);
+        for (int t = 0; t < n_frames; t++) {
+            mel_float[m * n_frames + t] = (mel_float[m * n_frames + t] - mean) * inv_std;
+        }
+    }
+
+    const int chunk_size = N_MELS * TIME_FRAMES;
+    int chunk_idx = 0;
+    int start_frame = 0;
+    while (start_frame < n_frames && chunk_idx < num_chunks) {
+        uint8_t* out = out_chunks + chunk_idx * chunk_size;
+        for (int m = 0; m < N_MELS; m++) {
+            for (int t = 0; t < TIME_FRAMES; t++) {
+                int src_t = start_frame + t;
+                float src = (src_t < n_frames) ? mel_float[m * n_frames + src_t] : 0.0f;
+                int ival = (int)roundf(src / scale + (float)zero_point);
+                if (ival < 0) ival = 0;
+                if (ival > 255) ival = 255;
+                out[m * TIME_FRAMES + t] = (uint8_t)ival;
+            }
+        }
+
+        chunk_idx++;
+        if (start_frame + TIME_FRAMES >= n_frames) break;
+        start_frame += CONF_MEL_STRIDE_FRAMES;
+    }
+
+    LOGD("mel chunks computed: audio_len=%d, frames=%d, chunks=%d", audio_len, n_frames, chunk_idx);
+
+    free(mel_float);
+    free(padded);
+    return chunk_idx;
 }

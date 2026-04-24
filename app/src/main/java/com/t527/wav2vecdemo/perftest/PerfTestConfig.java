@@ -7,12 +7,36 @@ public final class PerfTestConfig {
     // true: 측정 모드 (overlay/Toast off, 단지서버 off, WAV 저장 + CSV 로깅 on)
     // false: 실전 모드 (원본 동작)
     public static final boolean PERF_TEST_MODE = true;
+    // true: VT/VAD 루프를 사용하지 않고 테스트셋 WAV 파일을 직접 STT 추론.
+    public static final boolean STT_ONLY_DATASET_MODE = false;
+    // true: 각 테스트셋 파일을 추론 전에 스피커로 재생.
+    public static final boolean PLAY_AUDIO_BEFORE_INFER = false;
+    // false: Python 스피커 재생 + 마이크 측정 모드에서 VAD를 쓰지 않고 파일 길이 기반 고정 녹음.
+    public static final boolean MIC_TEST_USE_VAD = false;
+    // true: models/Conformer/stt_log_mel.pt NeMo TorchScript mel 사용.
+    // false: 기존 t527_vad_pipeline과 동일한 C/KissFFT mel 사용.
+    public static final boolean USE_TORCHSCRIPT_STT_MEL = false;
+    // 고정 녹음 시 파일 길이에 더해 녹음할 여유 시간(ms). adb broadcast/재생 시작 지연 흡수.
+    public static final int FIXED_CAPTURE_EXTRA_MS = 900;
+    // 마이크 입력 실험용 전처리. direct WAV 경로에는 적용하지 않는다.
+    public static final boolean MIC_PREPROCESS_FOR_STT = false;
+    public static final boolean MIC_DISABLE_AUDIO_EFFECTS = false;
+    public static final float MIC_PREPROCESS_TARGET_RMS = 0.045f;
+    public static final float MIC_PREPROCESS_MAX_GAIN = 4.0f;
+    public static final int FIXED_CAPTURE_DEFAULT_MS = 4000;
+    public static final int FIXED_CAPTURE_MAX_MS = 12000;
+    // 파일 간 간격(ms). 재생/추론 안정화를 위한 텀.
+    public static final int FILE_GAP_MS = 300;
+    // 최소 발화 길이(초). 성능측정 모드에서는 짧은 발화도 CSV에 남기기 위해 0.0f 권장.
+    public static final float MIN_SPEECH_SEC = 0.0f;
 
     // 런타임에 Context.getExternalFilesDir() 결과로 채워짐 (앱 전용 외부 저장소, scoped 권한 불필요)
     // 실 경로: /sdcard/Android/data/com.t527.sttperftest/files/{recordings,results}
     public static String ROOT_DIR = "";
     public static String RECORDINGS_DIR = "";
     public static String RESULTS_DIR = "";
+    public static String TESTSET_DIR = "";
+    public static String TESTSET_CSV = "";
 
     public static void initPaths(java.io.File externalFilesDir) {
         if (externalFilesDir == null) {
@@ -22,8 +46,11 @@ public final class PerfTestConfig {
         }
         RECORDINGS_DIR = ROOT_DIR + "/recordings";
         RESULTS_DIR = ROOT_DIR + "/results";
+        TESTSET_DIR = ROOT_DIR + "/testset";
+        TESTSET_CSV = TESTSET_DIR + "/testset.csv";
         new java.io.File(RECORDINGS_DIR).mkdirs();
         new java.io.File(RESULTS_DIR).mkdirs();
+        new java.io.File(TESTSET_DIR).mkdirs();
     }
 
     // play_sequence.py 가 보내는 broadcast action
@@ -32,4 +59,5 @@ public final class PerfTestConfig {
     public static final String EXTRA_GT = "gt";
     public static final String EXTRA_DOMAIN = "domain";
     public static final String EXTRA_INDEX = "index";
+    public static final String EXTRA_DURATION_MS = "duration_ms";
 }

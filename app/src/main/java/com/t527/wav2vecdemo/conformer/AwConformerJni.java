@@ -72,6 +72,14 @@ public class AwConformerJni {
     }
 
     /**
+     * Compute NeMo-compatible full-utterance mel once, then return concatenated
+     * quantized chunks. Layout: chunk0[80*301], chunk1[80*301], ...
+     */
+    public byte[] computeMelChunks(float[] audio16k, float scale, int zeroPoint) {
+        return nativeComputeMelChunks(audio16k, audio16k.length, scale, zeroPoint);
+    }
+
+    /**
      * One-shot: 16kHz float audio → NPU → argmax token IDs
      * @return argmax token IDs [76] for CTC decoding
      */
@@ -85,6 +93,7 @@ public class AwConformerJni {
     private native int[] nativeRunUint8(long ptr, byte[] uint8Mel);
     private native int[] nativeRunDatFile(long ptr, String datPath);
     private native byte[] nativeComputeMel(float[] audio16k, int audioLen, float scale, int zeroPoint);
+    private native byte[] nativeComputeMelChunks(float[] audio16k, int audioLen, float scale, int zeroPoint);
     private native int[] nativeAudioToArgmax(long ptr, float[] audio16k, int audioLen, float melScale, int melZp);
 
     // ===== Wakeword (BCResNet) =====

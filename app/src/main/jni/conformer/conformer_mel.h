@@ -11,6 +11,7 @@
 #define CONF_MEL_FMIN        0.0f
 #define CONF_MEL_FMAX        8000.0f
 #define CONF_MEL_TIME_FRAMES 301
+#define CONF_MEL_STRIDE_FRAMES 250
 #define CONF_MEL_LOG_GUARD   1e-5f
 
 // Initialize mel pipeline (pre-compute filterbank + window)
@@ -28,6 +29,20 @@ void conformer_mel_cleanup(void);
 int conformer_mel_compute(
     const float* audio, int audio_len,
     uint8_t* out_mel,
+    float scale, int zero_point
+);
+
+// Return NeMo-compatible full-mel frame count for an audio buffer.
+int conformer_mel_frame_count(int audio_len);
+
+// Return number of 301-frame chunks for a full mel using 250-frame stride.
+int conformer_mel_chunk_count(int n_frames);
+
+// Compute full normalized mel once, then emit quantized 301-frame chunks.
+// out_chunks must hold chunk_count * N_MELS * TIME_FRAMES bytes.
+int conformer_mel_compute_chunks(
+    const float* audio, int audio_len,
+    uint8_t* out_chunks,
     float scale, int zero_point
 );
 

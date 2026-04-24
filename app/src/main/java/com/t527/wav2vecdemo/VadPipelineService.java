@@ -12,6 +12,10 @@ import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.media.ToneGenerator;
 import android.media.AudioManager;
+import android.media.AudioTrack;
+import android.media.audiofx.AcousticEchoCanceler;
+import android.media.audiofx.AutomaticGainControl;
+import android.media.audiofx.NoiseSuppressor;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -26,6 +30,7 @@ import android.widget.Toast;
 import com.t527.wav2vecdemo.conformer.AwConformerJni;
 import com.t527.wav2vecdemo.conformer.ConformerDecoder;
 import com.t527.wav2vecdemo.conformer.SileroVad;
+import com.t527.wav2vecdemo.conformer.SttTorchscriptMel;
 import com.t527.wav2vecdemo.utils.DanjiServerSender;
 import com.t527.wav2vecdemo.utils.TtsReceiverServer;
 // PERF-TEST-CHANGE: 측정 인프라
@@ -35,6 +40,9 @@ import com.t527.wav2vecdemo.perftest.CsvLogger;
 import com.t527.wav2vecdemo.perftest.NextFileReceiver;
 
 import java.io.File;
+import java.io.BufferedReader;
+import java.io.FileInputStream;
+import java.io.FileReader;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.IOException;
@@ -42,6 +50,8 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 import org.json.JSONObject;
 
@@ -56,8 +66,11 @@ public class VadPipelineService extends Service {
     // Conformer
     private static final float CONF_MEL_SCALE = 0.025880949571728706f;
     private static final int CONF_MEL_ZP = 84;
+    private static final int CONF_MEL_BINS = 80;
     private static final int SEQ_OUT = 76;
-    private static final int STRIDE_OUT = 62;
+    private static final int WINDOW_FRAMES = 301;
+    private static final int STRIDE_FRAMES = 250;
+    private static final int STRIDE_OUT = 63;
 
     // Wakeword
     private static final float WK_THRESHOLD = 0.40f;
@@ -77,6 +90,7 @@ public class VadPipelineService extends Service {
     private AwConformerJni mJni;
     private ConformerDecoder mDecoder;
     private SileroVad mVad;
+    private SttTorchscriptMel mSttMel;
     private ToneGenerator mTone;
     private volatile boolean mRunning = false;
     private volatile boolean mSttRequested = false;
@@ -98,6 +112,7 @@ public class VadPipelineService extends Service {
     private int wkInpZp, wkOutZp;
     private String mWkNbPath;
     private String mLastIp = "";
+    private Thread mDatasetThread;
 
     private final Runnable mIpChecker = new Runnable() {
         @Override
@@ -170,13 +185,15 @@ public class VadPipelineService extends Service {
 
         initModels();
 
-        // TTS 수신 HTTP 서버 (port 8030)
-        try {
-            mTtsServer = new TtsReceiverServer(this);
-            mTtsServer.start();
-            Log.d(TAG, "TTS receiver server started on port 8030");
-        } catch (Exception e) {
-            Log.e(TAG, "TTS server start failed", e);
+        if (!(PerfTestConfig.PERF_TEST_MODE && !PerfTestConfig.MIC_TEST_USE_VAD)) {
+            // TTS 수신 HTTP 서버 (port 8030)
+            try {
+                mTtsServer = new TtsReceiverServer(this);
+                mTtsServer.start();
+                Log.d(TAG, "TTS receiver server started on port 8030");
+            } catch (Exception e) {
+                Log.e(TAG, "TTS server start failed", e);
+            }
         }
 
     }
@@ -190,7 +207,6 @@ public class VadPipelineService extends Service {
 
     private String copyAsset(String dir, String name) {
         File out = new File(getFilesDir(), dir.replace("/", "_") + "_" + name);
-        if (out.exists() && out.length() > 0) return out.getAbsolutePath();
         out.getParentFile().mkdirs();
         try (InputStream in = getAssets().open(dir + "/" + name);
              FileOutputStream fos = new FileOutputStream(out)) {
@@ -229,21 +245,36 @@ public class VadPipelineService extends Service {
     private void initModels() {
         String confNb = copyAsset("models/Conformer", "network_binary.nb");
         String confVocab = copyAsset("models/Conformer", "vocab_correct.json");
-        String wkNb = copyAsset("models/Wakeword", "network_binary.nb");
-        String wkMeta = copyAsset("models/Wakeword", "nbg_meta.json");
-        String vadOnnx = copyAsset("models/VAD", "silero_vad.onnx");
-
-        loadWakewordMeta(wkMeta);
-
         AwConformerJni.initNpu();
         mJni = new AwConformerJni();
         boolean confOk = mJni.init(confNb);
-        mWkNbPath = wkNb;
-        boolean wkOk = mJni.initWakeword(wkNb);
 
         mDecoder = new ConformerDecoder();
         mDecoder.loadVocab(confVocab);
+        boolean sttMelOk = true;
+        if (PerfTestConfig.USE_TORCHSCRIPT_STT_MEL) {
+            String sttMel = copyAsset("models/Conformer", "stt_log_mel.pt");
+            mSttMel = new SttTorchscriptMel();
+            sttMelOk = sttMel != null && mSttMel.init(sttMel);
+        }
 
+        if (PerfTestConfig.PERF_TEST_MODE
+                && (PerfTestConfig.STT_ONLY_DATASET_MODE || !PerfTestConfig.MIC_TEST_USE_VAD)) {
+            if (confOk && sttMelOk) {
+                mRunning = true;
+                showToast("STT 테스트 모드 준비 완료");
+            } else {
+                showToast("Conformer/STT mel 초기화 실패");
+            }
+            return;
+        }
+
+        String wkNb = copyAsset("models/Wakeword", "network_binary.nb");
+        String wkMeta = copyAsset("models/Wakeword", "nbg_meta.json");
+        String vadOnnx = copyAsset("models/VAD", "silero_vad.onnx");
+        loadWakewordMeta(wkMeta);
+        mWkNbPath = wkNb;
+        boolean wkOk = mJni.initWakeword(wkNb);
         mVad = new SileroVad();
         mVad.setThreshold(VAD_THRESHOLD);
         boolean vadOk = mVad.init(vadOnnx);
@@ -263,12 +294,22 @@ public class VadPipelineService extends Service {
         if (intent != null) {
             String action = intent.getAction();
             if (ACTION_MIC_GRANTED.equals(action)) {
-                Log.d(TAG, "BR: mic granted, starting VT");
+                Log.d(TAG, "BR: mic granted");
                 if (!mMicGranted) {
                     mMicGranted = true;
-                    mPipelineThread = new Thread(this::pipelineLoop);
-                    mPipelineThread.start();
-                    showToast("마이크 획득 - VT 시작");
+                    if (PerfTestConfig.PERF_TEST_MODE && PerfTestConfig.STT_ONLY_DATASET_MODE) {
+                        mDatasetThread = new Thread(this::runDatasetSttLoop, "stt-dataset-loop");
+                        mDatasetThread.start();
+                        showToast("STT 테스트셋 실행 시작");
+                    } else if (PerfTestConfig.PERF_TEST_MODE && !PerfTestConfig.MIC_TEST_USE_VAD) {
+                        mPipelineThread = new Thread(this::micSttOnlyLoop, "stt-only-mic-loop");
+                        mPipelineThread.start();
+                        showToast("STT 마이크 테스트 대기");
+                    } else {
+                        mPipelineThread = new Thread(this::pipelineLoop);
+                        mPipelineThread.start();
+                        showToast("마이크 획득 - VT 시작");
+                    }
                 }
             } else if (ACTION_START_STT.equals(action)) {
                 Log.d(TAG, "BR: STT requested");
@@ -289,6 +330,391 @@ public class VadPipelineService extends Service {
             out[i] = ((1 - frac) * pcm48k[idx0] + frac * pcm48k[idx1]) / 32768.0f;
         }
         return out;
+    }
+
+    private void micSttOnlyLoop() {
+        int bufSize = Math.max(
+                AudioRecord.getMinBufferSize(SR_MIC, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT),
+                SR_MIC * 2 * 2);
+        AudioRecord recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                SR_MIC, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
+        if (PerfTestConfig.MIC_DISABLE_AUDIO_EFFECTS) {
+            disableAudioEffects(recorder.getAudioSessionId());
+        }
+        recorder.startRecording();
+        Log.d(TAG, "STT-only mic loop started. source=VOICE_RECOGNITION, AudioRecord state=" + recorder.getState());
+        short[] discard = new short[SR_MIC / 50];
+
+        while (mRunning) {
+            if (mSttRequested) {
+                mSttRequested = false;
+                Log.d(TAG, "BR trigger: running fixed STT capture");
+                runSttFixedCapture(recorder);
+            } else {
+                recorder.read(discard, 0, discard.length);
+            }
+        }
+
+        recorder.stop();
+        recorder.release();
+        Log.d(TAG, "STT-only mic loop stopped");
+    }
+
+    private void disableAudioEffects(int audioSessionId) {
+        try {
+            if (AutomaticGainControl.isAvailable()) {
+                AutomaticGainControl agc = AutomaticGainControl.create(audioSessionId);
+                if (agc != null) {
+                    agc.setEnabled(false);
+                    Log.d(TAG, "AudioEffect: AGC disabled, enabled=" + agc.getEnabled());
+                    agc.release();
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "AudioEffect: AGC disable failed", e);
+        }
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                NoiseSuppressor ns = NoiseSuppressor.create(audioSessionId);
+                if (ns != null) {
+                    ns.setEnabled(false);
+                    Log.d(TAG, "AudioEffect: NS disabled, enabled=" + ns.getEnabled());
+                    ns.release();
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "AudioEffect: NS disable failed", e);
+        }
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                AcousticEchoCanceler aec = AcousticEchoCanceler.create(audioSessionId);
+                if (aec != null) {
+                    aec.setEnabled(false);
+                    Log.d(TAG, "AudioEffect: AEC disabled, enabled=" + aec.getEnabled());
+                    aec.release();
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "AudioEffect: AEC disable failed", e);
+        }
+    }
+
+    private static class DatasetItem {
+        final String fileName;
+        final String gt;
+
+        DatasetItem(String fileName, String gt) {
+            this.fileName = fileName;
+            this.gt = gt;
+        }
+    }
+
+    private static class WavData {
+        final short[] pcm16;
+        final int sampleRate;
+
+        WavData(short[] pcm16, int sampleRate) {
+            this.pcm16 = pcm16;
+            this.sampleRate = sampleRate;
+        }
+    }
+
+    private List<String> parseCsvLine(String line) {
+        List<String> out = new ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        boolean inQuote = false;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (c == '"') {
+                if (inQuote && i + 1 < line.length() && line.charAt(i + 1) == '"') {
+                    cur.append('"');
+                    i++;
+                } else {
+                    inQuote = !inQuote;
+                }
+            } else if (c == ',' && !inQuote) {
+                out.add(cur.toString());
+                cur.setLength(0);
+            } else {
+                cur.append(c);
+            }
+        }
+        out.add(cur.toString());
+        return out;
+    }
+
+    private int findColumnIndex(List<String> headers, String... candidates) {
+        for (String c : candidates) {
+            for (int i = 0; i < headers.size(); i++) {
+                if (c.equalsIgnoreCase(headers.get(i).trim())) return i;
+            }
+        }
+        return -1;
+    }
+
+    private List<DatasetItem> loadDatasetItems(String csvPath) {
+        List<DatasetItem> items = new ArrayList<>();
+        File csv = new File(csvPath);
+        if (!csv.exists()) {
+            Log.e(TAG, "Dataset CSV not found: " + csvPath);
+            return items;
+        }
+        try (BufferedReader br = new BufferedReader(new FileReader(csv))) {
+            String header = br.readLine();
+            if (header == null) return items;
+            List<String> headers = parseCsvLine(header);
+            int fileIdx = findColumnIndex(headers, "FileName", "file_path", "filepath", "path");
+            int gtIdx = findColumnIndex(headers, "gt", "GT", "transcript", "text");
+            if (fileIdx < 0) {
+                Log.e(TAG, "Dataset CSV missing file column");
+                return items;
+            }
+            String line;
+            while ((line = br.readLine()) != null) {
+                if (line.trim().isEmpty()) continue;
+                List<String> cols = parseCsvLine(line);
+                if (fileIdx >= cols.size()) continue;
+                String f = cols.get(fileIdx).trim();
+                String gt = (gtIdx >= 0 && gtIdx < cols.size()) ? cols.get(gtIdx).trim() : "";
+                if (!f.isEmpty()) items.add(new DatasetItem(f, gt));
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to load dataset CSV", e);
+        }
+        return items;
+    }
+
+    private String resolveDatasetFilePath(String fileName) {
+        if (fileName.startsWith("/")) return fileName;
+        return new File(PerfTestConfig.TESTSET_DIR, fileName).getAbsolutePath();
+    }
+
+    private WavData readWavPcm16(String path) {
+        try (FileInputStream fis = new FileInputStream(path)) {
+            byte[] riff = new byte[12];
+            int n = fis.read(riff);
+            if (n < 12) return null;
+            if (!(riff[0] == 'R' && riff[1] == 'I' && riff[2] == 'F' && riff[3] == 'F')) return null;
+            if (!(riff[8] == 'W' && riff[9] == 'A' && riff[10] == 'V' && riff[11] == 'E')) return null;
+
+            int channels = -1;
+            int sampleRate = -1;
+            int bitsPerSample = -1;
+            byte[] pcmBytes = null;
+            byte[] chunkHeader = new byte[8];
+            while (fis.read(chunkHeader) == 8) {
+                String chunkId = new String(chunkHeader, 0, 4, java.nio.charset.StandardCharsets.US_ASCII);
+                int chunkSize = ByteBuffer.wrap(chunkHeader, 4, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+                if (chunkSize < 0) return null;
+                byte[] chunk = new byte[chunkSize];
+                int read = 0;
+                while (read < chunkSize) {
+                    int r = fis.read(chunk, read, chunkSize - read);
+                    if (r <= 0) break;
+                    read += r;
+                }
+                if (read < chunkSize) return null;
+                if ("fmt ".equals(chunkId)) {
+                    if (chunkSize < 16) return null;
+                    channels = ((chunk[3] & 0xFF) << 8) | (chunk[2] & 0xFF);
+                    sampleRate = ByteBuffer.wrap(chunk, 4, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+                    bitsPerSample = ((chunk[15] & 0xFF) << 8) | (chunk[14] & 0xFF);
+                } else if ("data".equals(chunkId)) {
+                    pcmBytes = chunk;
+                    break;
+                }
+                if ((chunkSize & 1) == 1) fis.skip(1);
+            }
+            if (channels != 1 || bitsPerSample != 16 || pcmBytes == null || pcmBytes.length <= 0) {
+                Log.e(TAG, "Unsupported wav format: ch=" + channels + " bps=" + bitsPerSample + " path=" + path);
+                return null;
+            }
+            int read = pcmBytes.length;
+            int samples = read / 2;
+            short[] pcm = new short[samples];
+            ByteBuffer bb = ByteBuffer.wrap(pcmBytes).order(ByteOrder.LITTLE_ENDIAN);
+            for (int i = 0; i < samples; i++) pcm[i] = bb.getShort();
+            return new WavData(pcm, sampleRate);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to read wav: " + path, e);
+            return null;
+        }
+    }
+
+    private short[] resamplePcmTo16k(short[] src, int srcRate) {
+        if (srcRate == SR_MODEL) return src;
+        int dstLen = (int) ((long) src.length * SR_MODEL / srcRate);
+        short[] dst = new short[dstLen];
+        for (int i = 0; i < dstLen; i++) {
+            float srcPos = i * (float) srcRate / SR_MODEL;
+            int idx0 = (int) srcPos;
+            float frac = srcPos - idx0;
+            int idx1 = Math.min(idx0 + 1, src.length - 1);
+            dst[i] = (short) ((1f - frac) * src[idx0] + frac * src[idx1]);
+        }
+        return dst;
+    }
+
+    private float[] toFloatAudio(short[] pcm16) {
+        float[] out = new float[pcm16.length];
+        for (int i = 0; i < pcm16.length; i++) out[i] = pcm16[i] / 32768.0f;
+        return out;
+    }
+
+    private static class SttResult {
+        final String text;
+        final long melMs;
+        final long npuMs;
+        final int chunks;
+
+        SttResult(String text, long melMs, long npuMs, int chunks) {
+            this.text = text;
+            this.melMs = melMs;
+            this.npuMs = npuMs;
+            this.chunks = chunks;
+        }
+    }
+
+    private SttResult runConformerStt(float[] audio16k) {
+        if (!PerfTestConfig.USE_TORCHSCRIPT_STT_MEL) {
+            return runConformerSttWithCMel(audio16k);
+        }
+        if (mSttMel == null || !mSttMel.isInit()) {
+            Log.e(TAG, "STT TorchScript mel is not initialized");
+            return new SttResult("", 0, 0, 0);
+        }
+
+        long tM0 = System.currentTimeMillis();
+        SttTorchscriptMel.MelResult fullMel = mSttMel.compute(audio16k);
+        long tM1 = System.currentTimeMillis();
+
+        List<int[]> allArgmax = new ArrayList<>();
+        long tNpuTotal = 0;
+        int numChunks = 0;
+
+        int startFrame = 0;
+        while (startFrame < fullMel.nFrames) {
+            byte[] mel = mSttMel.quantizeChunk(fullMel, startFrame, CONF_MEL_SCALE, CONF_MEL_ZP);
+
+            long tN0 = System.currentTimeMillis();
+            int[] argmax = mJni.runUint8(mel);
+            long tN1 = System.currentTimeMillis();
+            tNpuTotal += (tN1 - tN0);
+
+            if (argmax != null) allArgmax.add(argmax);
+            numChunks++;
+            if (startFrame + WINDOW_FRAMES >= fullMel.nFrames) break;
+            startFrame += STRIDE_FRAMES;
+        }
+
+        List<Integer> mergedIds = new ArrayList<>();
+        for (int ci = 0; ci < allArgmax.size(); ci++) {
+            int[] ids = allArgmax.get(ci);
+            int useFrames = (ci < allArgmax.size() - 1) ? STRIDE_OUT : SEQ_OUT;
+            for (int t = 0; t < useFrames && t < ids.length; t++) mergedIds.add(ids[t]);
+        }
+        int[] merged = new int[mergedIds.size()];
+        for (int i = 0; i < merged.length; i++) merged[i] = mergedIds.get(i);
+
+        return new SttResult(mDecoder.decode(merged), tM1 - tM0, tNpuTotal, numChunks);
+    }
+
+    private SttResult runConformerSttWithCMel(float[] audio16k) {
+        long tMelTotal = 0;
+        long tNpuTotal = 0;
+        List<int[]> allArgmax = new ArrayList<>();
+
+        long tM0 = System.currentTimeMillis();
+        byte[] melChunks = mJni.computeMelChunks(audio16k, CONF_MEL_SCALE, CONF_MEL_ZP);
+        long tM1 = System.currentTimeMillis();
+        tMelTotal += (tM1 - tM0);
+
+        final int chunkSize = CONF_MEL_BINS * WINDOW_FRAMES;
+        int numChunks = melChunks == null ? 0 : melChunks.length / chunkSize;
+        for (int ci = 0; ci < numChunks; ci++) {
+            byte[] mel = new byte[chunkSize];
+            System.arraycopy(melChunks, ci * chunkSize, mel, 0, chunkSize);
+
+            long tN0 = System.currentTimeMillis();
+            int[] argmax = mJni.runUint8(mel);
+            long tN1 = System.currentTimeMillis();
+            tNpuTotal += (tN1 - tN0);
+
+            if (argmax != null) allArgmax.add(argmax);
+        }
+
+        List<Integer> mergedIds = new ArrayList<>();
+        for (int ci = 0; ci < allArgmax.size(); ci++) {
+            int[] ids = allArgmax.get(ci);
+            int useFrames = (ci < allArgmax.size() - 1) ? STRIDE_OUT : SEQ_OUT;
+            for (int t = 0; t < useFrames && t < ids.length; t++) mergedIds.add(ids[t]);
+        }
+        int[] merged = new int[mergedIds.size()];
+        for (int i = 0; i < merged.length; i++) merged[i] = mergedIds.get(i);
+
+        return new SttResult(mDecoder.decode(merged), tMelTotal, tNpuTotal, numChunks);
+    }
+
+    private void playPcm16(short[] pcm16, int sampleRate) {
+        AudioTrack at = null;
+        try {
+            int min = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            int buf = Math.max(min, pcm16.length * 2);
+            at = new AudioTrack(AudioManager.STREAM_MUSIC, sampleRate, AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT, buf, AudioTrack.MODE_STREAM);
+            at.play();
+            at.write(pcm16, 0, pcm16.length);
+            at.stop();
+        } catch (Exception e) {
+            Log.e(TAG, "Audio playback failed", e);
+        } finally {
+            if (at != null) at.release();
+        }
+    }
+
+    private void runDatasetSttLoop() {
+        List<DatasetItem> items = loadDatasetItems(PerfTestConfig.TESTSET_CSV);
+        if (items.isEmpty()) {
+            Log.e(TAG, "No dataset items. expected csv: " + PerfTestConfig.TESTSET_CSV);
+            showToast("테스트셋 CSV 없음");
+            return;
+        }
+        Log.d(TAG, "Dataset mode started: items=" + items.size());
+        for (int i = 0; i < items.size() && mRunning; i++) {
+            DatasetItem item = items.get(i);
+            String path = resolveDatasetFilePath(item.fileName);
+            WavData wav = readWavPcm16(path);
+            if (wav == null) {
+                Log.e(TAG, "Skip unreadable wav: " + path);
+                continue;
+            }
+            short[] pcm16k = resamplePcmTo16k(wav.pcm16, wav.sampleRate);
+            if (PerfTestConfig.PLAY_AUDIO_BEFORE_INFER) {
+                playPcm16(wav.pcm16, wav.sampleRate);
+                try { Thread.sleep(PerfTestConfig.FILE_GAP_MS); } catch (InterruptedException ignored) {}
+            }
+            runSttOnDatasetAudio(item.fileName, item.gt, i, toFloatAudio(pcm16k));
+            try { Thread.sleep(PerfTestConfig.FILE_GAP_MS); } catch (InterruptedException ignored) {}
+        }
+        Log.d(TAG, "Dataset mode finished");
+        showToast("테스트셋 STT 완료");
+    }
+
+    private void runSttOnDatasetAudio(String fileName, String gt, int idx, float[] audio16k) {
+        if (audio16k == null || audio16k.length == 0) return;
+        long savedMs = System.currentTimeMillis();
+        int totalSamples = audio16k.length;
+        float speechDuration = totalSamples / (float) SR_MODEL;
+
+        SttResult stt = runConformerStt(audio16k);
+        String text = stt.text;
+        long finishedMs = System.currentTimeMillis();
+        long durationMs = finishedMs - savedMs;
+        if (mCsv != null) {
+            mCsv.append(fileName, gt, text, durationMs, savedMs, finishedMs, speechDuration, stt.melMs, stt.npuMs, stt.chunks);
+        }
+        Log.d(TAG, String.format("DATASET STT idx=%d file=%s text=[%s] dur=%dms audio=%.2fs chunks=%d",
+                idx, fileName, text, durationMs, speechDuration, stt.chunks));
     }
 
     private void pipelineLoop() {
@@ -399,6 +825,11 @@ public class VadPipelineService extends Service {
     }
 
     private void runStt(AudioRecord recorder) {
+        if (PerfTestConfig.PERF_TEST_MODE && !PerfTestConfig.MIC_TEST_USE_VAD) {
+            runSttFixedCapture(recorder);
+            return;
+        }
+
         // wakeword 꼬리("더") 제거 + 명령어 보존 균형: 0.3초
         short[] flush = new short[SR_MIC * 3 / 10];  // 14400 = 0.3초
         recorder.read(flush, 0, flush.length);
@@ -456,7 +887,7 @@ public class VadPipelineService extends Service {
 
         int totalSamples = speechChunks.size() * VAD_WINDOW;
         float speechOnlyDuration = speechFrames * VAD_WINDOW / (float) SR_MODEL;
-        if (speechOnlyDuration < 0.5f) {
+        if (speechOnlyDuration < PerfTestConfig.MIN_SPEECH_SEC) {
             Log.d(TAG, String.format("VAD: speech only %.2fs (total %.2fs), skipping",
                     speechOnlyDuration, totalSamples / (float) SR_MODEL));
             return;
@@ -487,54 +918,14 @@ public class VadPipelineService extends Service {
             savedMs = System.currentTimeMillis();
         }
 
-        // STT 슬라이딩 윈도우
-        long tMelTotal = 0, tNpuTotal = 0;
-        int WINDOW_SAMPLES = SR_MODEL * 301 / 100;
-        int STRIDE_SAMPLES = SR_MODEL * 250 / 100;
-        List<int[]> allArgmax = new ArrayList<>();
-        int numChunks = 0;
-
-        int pos = 0;
-        while (pos < totalSamples) {
-            int end = Math.min(pos + WINDOW_SAMPLES, totalSamples);
-            int chunkLen = end - pos;
-            float[] chunkAudio = new float[chunkLen];
-            System.arraycopy(fullAudio, pos, chunkAudio, 0, chunkLen);
-
-            long tM0 = System.currentTimeMillis();
-            byte[] mel = mJni.computeMel(chunkAudio, CONF_MEL_SCALE, CONF_MEL_ZP);
-            long tM1 = System.currentTimeMillis();
-            tMelTotal += (tM1 - tM0);
-
-            long tN0 = System.currentTimeMillis();
-            int[] argmax = mJni.runUint8(mel);
-            long tN1 = System.currentTimeMillis();
-            tNpuTotal += (tN1 - tN0);
-
-            if (argmax != null) allArgmax.add(argmax);
-            numChunks++;
-            if (end >= totalSamples) break;
-            pos += STRIDE_SAMPLES;
-        }
-
-        List<Integer> mergedIds = new ArrayList<>();
-        for (int ci = 0; ci < allArgmax.size(); ci++) {
-            int[] ids = allArgmax.get(ci);
-            int useFrames = (ci < allArgmax.size() - 1) ? STRIDE_OUT : SEQ_OUT;
-            for (int t = 0; t < useFrames && t < ids.length; t++) {
-                mergedIds.add(ids[t]);
-            }
-        }
-        int[] merged = new int[mergedIds.size()];
-        for (int i = 0; i < merged.length; i++) merged[i] = mergedIds.get(i);
-
-        String text = mDecoder.decode(merged);
+        SttResult stt = runConformerStt(fullAudio);
+        String text = stt.text;
         String resultText = text.isEmpty() ? "(인식 없음)" : text;
 
         Log.d(TAG, String.format("STT: [%s] (%.1fs, mel=%dms, npu=%dms, %d chunks)",
-                resultText, speechDuration, tMelTotal, tNpuTotal, numChunks));
+                resultText, speechDuration, stt.melMs, stt.npuMs, stt.chunks));
 
-        showToast(String.format("%s\n(mel %dms, npu %dms, %d chunks)", resultText, tMelTotal, tNpuTotal, numChunks));
+        showToast(String.format("%s\n(mel %dms, npu %dms, %d chunks)", resultText, stt.melMs, stt.npuMs, stt.chunks));
 
         // PERF-TEST-CHANGE: CSV append (finished_ms = STT 완료 직후) + 단지서버 호출 가드
         if (PerfTestConfig.PERF_TEST_MODE) {
@@ -543,7 +934,7 @@ public class VadPipelineService extends Service {
             if (mCsv != null) {
                 mCsv.append(mappedFile, mappedGt, text,
                         durationMs, savedMs, finishedMs,
-                        speechDuration, tMelTotal, tNpuTotal, numChunks);
+                        speechDuration, stt.melMs, stt.npuMs, stt.chunks);
             }
             Log.d(TAG, String.format("PERF: idx=%d wav=%s text=[%s] dur=%dms speech=%.2fs",
                     mappedIndex, wavPath, text, durationMs, speechDuration));
@@ -562,6 +953,91 @@ public class VadPipelineService extends Service {
                 });
             }
         }
+    }
+
+    private float[] preprocessMicAudioForStt(float[] audio) {
+        if (!PerfTestConfig.MIC_PREPROCESS_FOR_STT || audio == null || audio.length == 0) {
+            return audio;
+        }
+
+        float mean = 0.0f;
+        for (float v : audio) mean += v;
+        mean /= audio.length;
+
+        float[] out = new float[audio.length];
+        double sumSq = 0.0;
+        for (int i = 0; i < audio.length; i++) {
+            float x = audio[i] - mean;
+            out[i] = x;
+            sumSq += x * x;
+        }
+
+        float rms = (float) Math.sqrt(sumSq / Math.max(1, out.length));
+        if (rms > 1.0e-5f) {
+            float gain = PerfTestConfig.MIC_PREPROCESS_TARGET_RMS / rms;
+            gain = Math.max(0.25f, Math.min(gain, PerfTestConfig.MIC_PREPROCESS_MAX_GAIN));
+            for (int i = 0; i < out.length; i++) {
+                float v = out[i] * gain;
+                if (v > 1.0f) v = 1.0f;
+                else if (v < -1.0f) v = -1.0f;
+                out[i] = v;
+            }
+            Log.d(TAG, String.format(java.util.Locale.US,
+                    "MIC_PREPROCESS: rms=%.6f target=%.6f gain=%.3f",
+                    rms, PerfTestConfig.MIC_PREPROCESS_TARGET_RMS, gain));
+        }
+        return out;
+    }
+
+    private void runSttFixedCapture(AudioRecord recorder) {
+        String mappedFile = NextFileReceiver.currentFile;
+        String mappedGt = NextFileReceiver.currentGt;
+        int mappedIndex = NextFileReceiver.currentIndex;
+        int sourceDurationMs = NextFileReceiver.currentDurationMs;
+        int captureMs = sourceDurationMs > 0
+                ? sourceDurationMs + PerfTestConfig.FIXED_CAPTURE_EXTRA_MS
+                : PerfTestConfig.FIXED_CAPTURE_DEFAULT_MS;
+        captureMs = Math.max(500, Math.min(captureMs, PerfTestConfig.FIXED_CAPTURE_MAX_MS));
+
+        int targetSamples48k = SR_MIC * captureMs / 1000;
+        short[] pcm48k = new short[targetSamples48k];
+        int offset = 0;
+        long captureStartMs = System.currentTimeMillis();
+        while (mRunning && offset < targetSamples48k) {
+            int read = recorder.read(pcm48k, offset, targetSamples48k - offset);
+            if (read > 0) offset += read;
+        }
+        if (offset <= 0) {
+            Log.d(TAG, "FIXED STT: no audio captured");
+            return;
+        }
+
+        float[] fullAudio = preprocessMicAudioForStt(resample48to16(pcm48k, offset));
+        float speechDuration = fullAudio.length / (float) SR_MODEL;
+        mRecCounter++;
+        String wavPath = String.format(java.util.Locale.US,
+                "%s/%s_%05d.wav", PerfTestConfig.RECORDINGS_DIR, mSessionId, mRecCounter);
+        WavWriter.writeMonoPcm16(wavPath, fullAudio, SR_MODEL);
+        long savedMs = System.currentTimeMillis();
+
+        SttResult stt = runConformerStt(fullAudio);
+        String text = stt.text;
+        String resultText = text.isEmpty() ? "(인식 없음)" : text;
+        long finishedMs = System.currentTimeMillis();
+        long durationMs = finishedMs - savedMs;
+
+        Log.d(TAG, String.format("FIXED STT: idx=%d src=%dms cap=%dms actual=%dms text=[%s] (audio=%.2fs, mel=%dms, npu=%dms, %d chunks)",
+                mappedIndex, sourceDurationMs, captureMs, finishedMs - captureStartMs, resultText,
+                speechDuration, stt.melMs, stt.npuMs, stt.chunks));
+        showToast(String.format("%s\n(mel %dms, npu %dms, %d chunks)", resultText, stt.melMs, stt.npuMs, stt.chunks));
+
+        if (mCsv != null) {
+            mCsv.append(mappedFile, mappedGt, text,
+                    durationMs, savedMs, finishedMs,
+                    speechDuration, stt.melMs, stt.npuMs, stt.chunks);
+        }
+        Log.d(TAG, String.format("PERF: idx=%d wav=%s text=[%s] dur=%dms speech=%.2fs",
+                mappedIndex, wavPath, text, durationMs, speechDuration));
     }
 
     private void removeOverlay(TextView tv) {

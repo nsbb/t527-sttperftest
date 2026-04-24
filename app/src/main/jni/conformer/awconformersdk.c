@@ -216,6 +216,45 @@ jbyteArray Java_com_t527_wav2vecdemo_conformer_AwConformerJni_nativeComputeMel(
     return result;
 }
 
+// Compute full-utterance mel once, then split into quantized NeMo-style chunks.
+JNIEXPORT JNICALL
+jbyteArray Java_com_t527_wav2vecdemo_conformer_AwConformerJni_nativeComputeMelChunks(
+    JNIEnv *env, jobject thiz, jfloatArray audio16k, jint audioLen,
+    jfloat scale, jint zeroPoint) {
+
+    int n_frames = conformer_mel_frame_count((int)audioLen);
+    int num_chunks = conformer_mel_chunk_count(n_frames);
+    int chunk_size = CONF_MEL_N_MELS * CONF_MEL_TIME_FRAMES;
+    if (num_chunks <= 0) {
+        return (*env)->NewByteArray(env, 0);
+    }
+
+    int total_size = num_chunks * chunk_size;
+    uint8_t *out_chunks = (uint8_t *)malloc((size_t)total_size);
+    if (!out_chunks) {
+        return (*env)->NewByteArray(env, 0);
+    }
+
+    float *audio = (*env)->GetFloatArrayElements(env, audio16k, NULL);
+    int actual_chunks = conformer_mel_compute_chunks(
+        audio, (int)audioLen, out_chunks, scale, zeroPoint);
+    (*env)->ReleaseFloatArrayElements(env, audio16k, audio, JNI_ABORT);
+
+    if (actual_chunks < num_chunks) {
+        total_size = actual_chunks * chunk_size;
+    }
+
+    LOGD("nativeComputeMelChunks: audio=%d samples, frames=%d, chunks=%d",
+         (int)audioLen, n_frames, actual_chunks);
+
+    jbyteArray result = (*env)->NewByteArray(env, total_size);
+    if (total_size > 0) {
+        (*env)->SetByteArrayRegion(env, result, 0, total_size, (jbyte *)out_chunks);
+    }
+    free(out_chunks);
+    return result;
+}
+
 // One-shot: 16kHz float audio → NPU → argmax
 JNIEXPORT JNICALL
 jintArray Java_com_t527_wav2vecdemo_conformer_AwConformerJni_nativeAudioToArgmax(

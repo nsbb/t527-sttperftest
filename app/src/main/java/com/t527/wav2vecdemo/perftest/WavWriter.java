@@ -38,7 +38,7 @@ public final class WavWriter {
             fos.write(header.array());
             ByteBuffer body = ByteBuffer.allocate(dataSize).order(ByteOrder.LITTLE_ENDIAN);
             for (float s : samples) {
-                int v = Math.round(s);
+                int v = Math.round(s * Short.MAX_VALUE);
                 if (v > Short.MAX_VALUE) v = Short.MAX_VALUE;
                 if (v < Short.MIN_VALUE) v = Short.MIN_VALUE;
                 body.putShort((short) v);

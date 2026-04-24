@@ -34,7 +34,6 @@ public class ConformerTestActivity extends AppCompatActivity {
 
     private String copyAssetToInternal(String assetName) {
         File outFile = new File(getFilesDir(), assetName);
-        if (outFile.exists() && outFile.length() > 0) return outFile.getAbsolutePath();
         outFile.getParentFile().mkdirs();
         try (InputStream in = getAssets().open(ASSET_DIR + "/" + assetName);
              FileOutputStream out = new FileOutputStream(outFile)) {
