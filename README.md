@@ -1,34 +1,103 @@
-# t527_vad_service (백업 2026-04-03)
+# t527-sttperftest
 
-**패키지:** `com.t527.vad_service`
-**상태:** 월패드에서 동작 확인된 안정 버전 (Java)
+T527 Android STT performance-test app source.
 
-## 기능
-- VT(BCResNet) → VAD(Silero) → STT(Conformer) → NLU(KoELECTRA) → overlay
-- Foreground Service + BR 부팅 연동
-- 월패드(IHN-1300D, Android 13) 실기기 테스트 완료
+This repository is intentionally source-only:
 
-## 확인된 동작
-- FM1388 마이크 → AudioRecord 연동 OK
-- wakeword "하이 원더" 감지 (prob 0.40~0.51)
-- STT "엘리베이터 불러줘" 인식 OK (mel 36ms, npu 257ms)
-- NLU 48 intents 분류 OK
-- overlay 보라색 반투명 표시 OK
+- excluded: `build/`, APK/AAB outputs
+- excluded: model binaries (`*.nb`, `*.onnx`, `*.pt`, test audio)
+- included: Java/JNI sources, perf-test hooks, small config/json/meta files
 
-## 알려진 문제
-- wallpadcall 마이크 점유 충돌 (간헐적 silenced)
-- FM1388에서 wakeword prob 낮음 (데브킷 대비)
+The app package used for testing is:
 
-## 설치
+- `com.t527.sttperftest`
+
+## What is in this repo
+
+- Fixed-capture mic STT test flow
+- WAV recording + CSV logging
+- dataset file mapping via broadcast
+- Conformer STT path
+- NeMo TorchScript mel integration code path
+
+Important toggles live in:
+
+- `app/src/main/java/com/t527/wav2vecdemo/perftest/PerfTestConfig.java`
+
+## What is not in this repo
+
+You must provide model binaries and test audio yourself.
+
+Required runtime assets:
+
+- `app/src/main/assets/models/Conformer/network_binary.nb`
+- `app/src/main/assets/models/Conformer/stt_log_mel.pt`  (only if TorchScript mel is enabled)
+- `app/src/main/assets/models/Wakeword/network_binary.nb`
+- `app/src/main/assets/models/VAD/silero_vad.onnx`
+
+Already included small config files:
+
+- `app/src/main/assets/models/Conformer/nbg_meta.json`
+- `app/src/main/assets/models/Conformer/vocab_correct.json`
+- `app/src/main/assets/models/Wakeword/nbg_meta.json`
+
+## Build
+
+Requirements:
+
+- Android Studio / Gradle
+- Android SDK + NDK
+- Java 11
+- arm64 target device
+
+Build debug APK:
+
 ```bash
-ADB="/mnt/c/Users/nsbb/AppData/Local/Android/Sdk/platform-tools/adb.exe"
-DEV="00f75c0572408721ed9"
-
-$ADB -s $DEV install -r 'C:\Users\nsbb\AndroidStudioProjects\t527_vad_service_backup_20260403\app\build\outputs\apk\debug\app-debug.apk'
-$ADB -s $DEV shell pm grant com.t527.vad_service android.permission.RECORD_AUDIO
-$ADB -s $DEV shell appops set com.t527.vad_service SYSTEM_ALERT_WINDOW allow
-$ADB -s $DEV shell am start -n com.t527.vad_service/com.t527.wav2vecdemo.VadPipelineActivity
-
-# 로그
-$ADB -s $DEV logcat -s VadPipelineService
+./gradlew assembleDebug
 ```
+
+APK output:
+
+```bash
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+## Install
+
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell pm grant com.t527.sttperftest android.permission.RECORD_AUDIO
+adb shell am start -n com.t527.sttperftest/com.t527.wav2vecdemo.VadPipelineActivity
+```
+
+## Perf-test notes
+
+- mic fixed-capture mode uses source wav duration + extra capture margin
+- CSV columns include:
+  - `FileName`
+  - `gt`
+  - `ResultText`
+  - `Duration(ms)`
+  - `saved_ms`
+  - `finished_ms`
+  - `speech_duration_sec`
+  - `mel_ms`
+  - `npu_ms`
+  - `num_chunks`
+
+- CER is computed outside the app with `nlptutti`
+- RTF is computed as:
+  - `Duration(ms) / (speech_duration_sec * 1000)`
+
+## Main files
+
+- `app/src/main/java/com/t527/wav2vecdemo/VadPipelineService.java`
+- `app/src/main/java/com/t527/wav2vecdemo/perftest/PerfTestConfig.java`
+- `app/src/main/java/com/t527/wav2vecdemo/perftest/NextFileReceiver.java`
+- `app/src/main/java/com/t527/wav2vecdemo/conformer/SttTorchscriptMel.java`
+- `app/src/main/jni/conformer/conformer_mel.c`
+
+## Notes
+
+- This repo is for rebuilding and continuing test work on another machine.
+- Copy your own model binaries and dataset audio before running full tests.
