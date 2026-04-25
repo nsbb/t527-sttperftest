@@ -23,6 +23,12 @@ public final class PerfTestConfig {
     public static final boolean MIC_DISABLE_AUDIO_EFFECTS = false;
     public static final float MIC_PREPROCESS_TARGET_RMS = 0.045f;
     public static final float MIC_PREPROCESS_MAX_GAIN = 4.0f;
+    // D1: leading/trailing silence를 제거해 mel 정규화 분포 shift를 완화.
+    // mic 녹음은 broadcast→스피커→공기→mic acoustic latency로 leading silence가 ~500ms 더 김.
+    // 호스트 검증에서 dataset 모드 CER 18.11% → 16.68% (-1.42 pp).
+    public static final boolean MIC_TRIM_SILENCE = true;
+    public static final float MIC_TRIM_RMS_THRESH = 0.01f;
+    public static final int MIC_TRIM_PAD_MS = 80;
     public static final int FIXED_CAPTURE_DEFAULT_MS = 4000;
     public static final int FIXED_CAPTURE_MAX_MS = 12000;
     // 파일 간 간격(ms). 재생/추론 안정화를 위한 텀.

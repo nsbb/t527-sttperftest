@@ -87,6 +87,29 @@ public class VadPipelineService extends Service {
     private static final int WK_WINDOW_48K = 72000;
     private static final int WK_HOP_48K = 24000;
 
+    // B3: 48k→16k anti-alias decimation FIR.
+    // 63-tap Hamming-windowed sinc, cutoff 7500 Hz @ 48 kHz fs.
+    // 통과대역 0~7000 Hz 평탄(0 dB), 9 kHz 이상 −54 dB. 합 = 1.0 (DC unity).
+    // 기존 2점 linear interp는 8 kHz 위 신호를 alias로 폴드해 mel 자음 영역 왜곡.
+    private static final float[] LPF_FIR_48K_TO_16K_63 = new float[] {
+            -0.0006839896f, -0.0008085108f, -0.0001917471f, +0.0008138334f,
+            +0.0013580218f, +0.0006465351f, -0.0011507747f, -0.0025364808f,
+            -0.0017176602f, +0.0014329691f, +0.0044168503f, +0.0038027603f,
+            -0.0012445555f, -0.0069486388f, -0.0073330924f, +0.0000000000f,
+            +0.0099533348f, +0.0128247091f, +0.0031347828f, -0.0131440116f,
+            -0.0211057152f, -0.0095555478f, +0.0161664691f, +0.0341450318f,
+            +0.0224921791f, -0.0186549254f, -0.0589144170f, -0.0542500420f,
+            +0.0202922127f, +0.1458650904f, +0.2644204213f, +0.3129498158f,
+            +0.2644204213f, +0.1458650904f, +0.0202922127f, -0.0542500420f,
+            -0.0589144170f, -0.0186549254f, +0.0224921791f, +0.0341450318f,
+            +0.0161664691f, -0.0095555478f, -0.0211057152f, -0.0131440116f,
+            +0.0031347828f, +0.0128247091f, +0.0099533348f, +0.0000000000f,
+            -0.0073330924f, -0.0069486388f, -0.0012445555f, +0.0038027603f,
+            +0.0044168503f, +0.0014329691f, -0.0017176602f, -0.0025364808f,
+            -0.0011507747f, +0.0006465351f, +0.0013580218f, +0.0008138334f,
+            -0.0001917471f, -0.0008085108f, -0.0006839896f
+    };
+
     private AwConformerJni mJni;
     private ConformerDecoder mDecoder;
     private SileroVad mVad;
@@ -320,14 +343,20 @@ public class VadPipelineService extends Service {
     }
 
     private float[] resample48to16(short[] pcm48k, int len) {
+        final float[] h = LPF_FIR_48K_TO_16K_63;
+        final int N = h.length;
+        final int half = N / 2;
         int newLen = len / 3;
         float[] out = new float[newLen];
         for (int i = 0; i < newLen; i++) {
-            float srcIdx = i * 3.0f;
-            int idx0 = (int) srcIdx;
-            float frac = srcIdx - idx0;
-            int idx1 = Math.min(idx0 + 1, len - 1);
-            out[i] = ((1 - frac) * pcm48k[idx0] + frac * pcm48k[idx1]) / 32768.0f;
+            int center = i * 3;
+            float acc = 0f;
+            for (int k = 0; k < N; k++) {
+                int j = center + k - half;
+                float s = (j >= 0 && j < len) ? (float) pcm48k[j] : 0f;
+                acc += s * h[k];
+            }
+            out[i] = acc / 32768.0f;
         }
         return out;
     }
@@ -703,6 +732,8 @@ public class VadPipelineService extends Service {
     private void runSttOnDatasetAudio(String fileName, String gt, int idx, float[] audio16k) {
         if (audio16k == null || audio16k.length == 0) return;
         long savedMs = System.currentTimeMillis();
+        // mic preprocess (silence trim 등) — dataset 모드로 mic 녹음 재투입 시 효과 검증 가능
+        audio16k = preprocessMicAudioForStt(audio16k);
         int totalSamples = audio16k.length;
         float speechDuration = totalSamples / (float) SR_MODEL;
 
@@ -956,20 +987,25 @@ public class VadPipelineService extends Service {
     }
 
     private float[] preprocessMicAudioForStt(float[] audio) {
-        if (!PerfTestConfig.MIC_PREPROCESS_FOR_STT || audio == null || audio.length == 0) {
-            return audio;
+        if (audio == null || audio.length == 0) return audio;
+        float[] x = audio;
+        if (PerfTestConfig.MIC_TRIM_SILENCE) {
+            x = trimSilenceRms(x);
+        }
+        if (!PerfTestConfig.MIC_PREPROCESS_FOR_STT) {
+            return x;
         }
 
         float mean = 0.0f;
-        for (float v : audio) mean += v;
-        mean /= audio.length;
+        for (float v : x) mean += v;
+        mean /= x.length;
 
-        float[] out = new float[audio.length];
+        float[] out = new float[x.length];
         double sumSq = 0.0;
-        for (int i = 0; i < audio.length; i++) {
-            float x = audio[i] - mean;
-            out[i] = x;
-            sumSq += x * x;
+        for (int i = 0; i < x.length; i++) {
+            float v = x[i] - mean;
+            out[i] = v;
+            sumSq += v * v;
         }
 
         float rms = (float) Math.sqrt(sumSq / Math.max(1, out.length));
@@ -986,6 +1022,41 @@ public class VadPipelineService extends Service {
                     "MIC_PREPROCESS: rms=%.6f target=%.6f gain=%.3f",
                     rms, PerfTestConfig.MIC_PREPROCESS_TARGET_RMS, gain));
         }
+        return out;
+    }
+
+    // D1: 10ms RMS-window 기반 leading/trailing silence trim.
+    // mic 녹음의 acoustic latency로 인한 leading silence (~518ms 평균)를 제거해
+    // mel per-feature 정규화에서 silence-bias된 mean/std 분포 shift를 완화.
+    private float[] trimSilenceRms(float[] x) {
+        if (x == null || x.length == 0) return x;
+        int win = SR_MODEL / 100; // 10ms @ 16k = 160 samples
+        int n = x.length / win;
+        if (n < 4) return x;
+        boolean[] voiced = new boolean[n];
+        final float thresh = PerfTestConfig.MIC_TRIM_RMS_THRESH;
+        for (int i = 0; i < n; i++) {
+            int s = i * win, e = (i + 1) * win;
+            double sum = 0.0;
+            for (int j = s; j < e; j++) sum += x[j] * x[j];
+            voiced[i] = Math.sqrt(sum / win) >= thresh;
+        }
+        int first = -1, last = -1;
+        for (int i = 0; i < n; i++) if (voiced[i]) { first = i; break; }
+        for (int i = n - 1; i >= 0; i--) if (voiced[i]) { last = i; break; }
+        if (first < 0 || last < 0) return x; // all silent — leave as-is
+        int padFrames = Math.max(0, PerfTestConfig.MIC_TRIM_PAD_MS / 10); // 10ms units
+        int sStart = Math.max(0, (first - padFrames) * win);
+        int eEnd = Math.min(x.length, (last + padFrames + 1) * win);
+        if (eEnd - sStart >= x.length) return x;
+        float[] out = new float[eEnd - sStart];
+        System.arraycopy(x, sStart, out, 0, out.length);
+        Log.d(TAG, String.format(java.util.Locale.US,
+                "MIC_TRIM: %.2fs -> %.2fs (cut %.0fms lead, %.0fms tail)",
+                x.length / (float) SR_MODEL,
+                out.length / (float) SR_MODEL,
+                (sStart) / (float) SR_MODEL * 1000,
+                (x.length - eEnd) / (float) SR_MODEL * 1000));
         return out;
     }
 
