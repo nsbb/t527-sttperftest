@@ -230,7 +230,59 @@ probe20 dataset sweep:
 
 git: `b29ea9c` on `mic-gap-fix` (Bitbucket pushed).
 
-### 4.10 F series — Per-bin time-variance compression 직접 공격 (FALSIFIED)
+### 4.10 G~M series — Receive-side processing fine-tune
+
+USB는 noise floor와 frequency response가 DMIC와 다름. 더 강력한 receive-side 처리 필요.
+
+**Probe20 dataset sweep summary** (matched 20 utterances, direct WAV 18.60% target):
+
+| 시리즈 | 핵심 변화 | best variant | best CER | Δ from prev |
+|---|---|---|---:|---:|
+| G | adaptive trim multiplier (noise_p5 × N) | G9 mult=5x | 33.14% | -4.20 from raw |
+| H | adaptive trim + pad sweep | H6 5x_pad30 | 31.75 | -1.39 |
+| I | + HPF 다양한 cutoff | I2 HPF150_trim5 | 30.53 | -1.22 |
+| J | HPF cutoff 세밀 sweep | J8 HPF150_trim5_pad150 | 28.59 | -1.94 |
+| K | pad/mult fine-tune at HPF150 | **K4 HPF150_trim4_pad200** | **25.17%** | **-3.42** |
+| L | aggressive non-linear (compander/gate/resynth) | 모두 K4보다 나쁨 | - | saturation |
+| M | calibrated channel inverse EQ | 모두 broken (phase/overcorrection) | - | - |
+
+**확정 winner: K4 = HPF 150Hz biquad + adaptive trim mult=4.0 + pad=200ms**.
+
+**probe20 한계 분석**:
+- Direct WAV probe20 = **18.60%** (NOT 9% — probe20는 짧은/구어체 어려운 발화 위주로 sample bias)
+- K4 dataset = 25.17%, K4 LIVE = 28.54%
+- 차이는 주로 hard utterances (예: "열심히 안 했어" direct 50% / K4 LIVE 100%; "근데 걔 착하대 엄청" direct 38% / K4 LIVE 88%)
+- **non-bias한 평가는 clean300 기준** (direct 7.76% per HANDOFF)
+
+### 4.11 LIVE clean300 검증 (K4 적용, 2026-04-26)
+
+`MIC_HPF_CUTOFF_HZ=150f` + `MIC_TRIM_ADAPTIVE_MULT=4.0f` + `MIC_TRIM_PAD_MS=200` 안드로이드 포팅 후 mouth simulator + USB Britz BE_STM30U LIVE 측정:
+
+| 비교 (clean300) | CER | 비고 |
+|---|---:|---|
+| Direct WAV clean300 | **~7.76%** | gold standard (HANDOFF, mic 안 거침) |
+| USB adaptive trim only LIVE | 18.33% | 이전 run |
+| **USB K4 LIVE clean300** | **17.48%** | HPF 150 + trim 4x + pad 200 |
+| Wallpad DMIC LIVE Apr 24 | 17.96% | 참고 (다른 mic) |
+
+**🎯 K4 LIVE clean300 = 17.48%**:
+- Direct WAV (7.76%) 대비 +9.72pp (irreducible acoustic chain loss)
+- DMIC LIVE보다 -0.48pp 우수
+- 112/300 (37%) 완벽 transcript
+- Per-duration: <2s 28.56%, 2-3s 8.33%, 3-4.5s 14.21%, ≥4.5s 24.71%
+- 2-3s 발화는 direct 수준 도달
+
+**구현된 receive-side pipeline** (`preprocessMicAudioForStt`):
+1. Biquad HPF (150 Hz, Q=0.7) — 저주파 노이즈/룸 럼블 컷
+2. Adaptive RMS trim (frame RMS p5 × 4.0, pad 200ms) — silence ratio 보정
+3. (옵션) RMS 정규화는 disabled (악화 확인됨)
+
+**한계 — 더 낮추려면 mel-domain 처리 (JNI 수정) 필요**:
+- 신호 도메인 처리는 25% 부근에서 saturation (probe20 dataset 기준)
+- compander/gate/resynth/inverse-EQ 모두 효과 없음 또는 악화
+- 다음 단계: per-feature normalization을 voiced frames만으로 수행 (JNI conformer_mel.c 변경)
+
+### 4.12 F series — Per-bin time-variance compression 직접 공격 (FALSIFIED)
 
 **가설**: USB의 mel per-bin time-variance가 DIRECT의 40%(2.09 vs 5.22)로 압축됨. 이를 회복시키면 STT가 좋아질 것.
 
