@@ -45,6 +45,7 @@ probe20 (20 sample, dataset 모드) 기준 비교. 단순화를 위해 변종별
 | **N** | mel-domain normalization 변경 (JNI) | mode 0 (default) | 25.31 | **모델이 NeMo std에 학습**, voiced/floor/noise-sub 모두 악화 |
 | **O/P** | chunk merge stride/drop_left 변경 | P5 stride65+drop_left2 | 23.49** | long utterance만 효과 |
 | Q | WPE dereverberation (nara_wpe) | Q1 wpe-only (taps=10) | 34.84 | -2.5pp 단독, K4 추가 효과 없음 |
+| R | spectral gating (noisereduce non-stationary) | R7 mild only | 27.63 | K4 단독 25.17보다 +2.5pp 나쁨 |
 
 *D series는 DMIC에서 측정. USB는 nominally 응답하지만 효과 약함.
 **O/P는 long utterance(>=4.5s) subset 측정. 전체 평균은 K4와 거의 동일.
@@ -153,11 +154,12 @@ USE_TORCHSCRIPT_STT_MEL = false;
 
 ## 9. 다음 에이전트가 시도할 것 (priority 순)
 
-### A. 시도 완료 (Q series — WPE 검증 완료)
-- WPE 단독: 34.84% (USB raw 37.34 → -2.5pp)
-- WPE + K4 조합: 25.58~29.56% (K4 단독 25.17%과 동급 또는 약간 나쁨)
-- **결론**: WPE의 dereverberation 효과는 K4의 HPF+adaptive trim에 이미 내포됨
-- shape 사용 주의: nara_wpe wpe_v8은 (F, D, T) 형태 요구 (D=mic 채널)
+### A. 시도 완료 — 신호 도메인 saturation 최종 확인
+- **Q series (WPE dereverberation)**: 단독 -2.5pp, K4 추가 효과 없음
+- **R series (noisereduce spectral gating)**: 단독 -8pp 개선 (R6 28.94%), K4 +2.5pp 나쁨 (R4)
+- **결론**: 라이브러리 기반 speech enhancement (WPE, spectral gating, MMSE) 모두 K4 단독(25.17% probe20 dataset, 17.48% LIVE clean300)을 못 이김
+- 이유: K4의 HPF150 + adaptive trim 4x + pad 200 자체가 reverb tail 영향과 silence ratio shift를 동시에 줄임
+- 더 정교한 enhancement (MetricGAN+, DeepFilterNet)는 NPU 임베디드에 무거움 + 학습 분포 의존
 
 ### B. 미시도 — 가능성 있음
 1. **Test-time augmentation (TTA)** — 같은 utterance를 다른 전처리로 N번 추론 → token-level voting
