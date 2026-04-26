@@ -269,6 +269,11 @@ public class VadPipelineService extends Service {
         String confNb = copyAsset("models/Conformer", "network_binary.nb");
         String confVocab = copyAsset("models/Conformer", "vocab_correct.json");
         AwConformerJni.initNpu();
+        // N series: configure mel-domain normalization mode
+        AwConformerJni.nativeSetMelNormMode(
+                PerfTestConfig.MEL_NORM_MODE,
+                PerfTestConfig.MEL_NORM_VOICED_PCT,
+                PerfTestConfig.MEL_NORM_FLOOR_LOG);
         mJni = new AwConformerJni();
         boolean confOk = mJni.init(confNb);
 
@@ -637,10 +642,17 @@ public class VadPipelineService extends Service {
         }
 
         List<Integer> mergedIds = new ArrayList<>();
+        // O series: configurable chunk merge with drop_left/drop_right and stride_out override
+        int strideOut = (PerfTestConfig.CHUNK_STRIDE_OUT_OVERRIDE > 0)
+                ? PerfTestConfig.CHUNK_STRIDE_OUT_OVERRIDE : STRIDE_OUT;
+        int dropLeft = Math.max(0, PerfTestConfig.CHUNK_DROP_LEFT);
+        int dropRight = Math.max(0, PerfTestConfig.CHUNK_DROP_RIGHT);
         for (int ci = 0; ci < allArgmax.size(); ci++) {
             int[] ids = allArgmax.get(ci);
-            int useFrames = (ci < allArgmax.size() - 1) ? STRIDE_OUT : SEQ_OUT;
-            for (int t = 0; t < useFrames && t < ids.length; t++) mergedIds.add(ids[t]);
+            int useFrames = (ci < allArgmax.size() - 1) ? strideOut : SEQ_OUT;
+            int startT = (ci > 0) ? dropLeft : 0;
+            int endT = useFrames - ((ci < allArgmax.size() - 1) ? dropRight : 0);
+            for (int t = startT; t < endT && t < ids.length; t++) mergedIds.add(ids[t]);
         }
         int[] merged = new int[mergedIds.size()];
         for (int i = 0; i < merged.length; i++) merged[i] = mergedIds.get(i);
@@ -673,10 +685,17 @@ public class VadPipelineService extends Service {
         }
 
         List<Integer> mergedIds = new ArrayList<>();
+        // O series: configurable chunk merge with drop_left/drop_right and stride_out override
+        int strideOut = (PerfTestConfig.CHUNK_STRIDE_OUT_OVERRIDE > 0)
+                ? PerfTestConfig.CHUNK_STRIDE_OUT_OVERRIDE : STRIDE_OUT;
+        int dropLeft = Math.max(0, PerfTestConfig.CHUNK_DROP_LEFT);
+        int dropRight = Math.max(0, PerfTestConfig.CHUNK_DROP_RIGHT);
         for (int ci = 0; ci < allArgmax.size(); ci++) {
             int[] ids = allArgmax.get(ci);
-            int useFrames = (ci < allArgmax.size() - 1) ? STRIDE_OUT : SEQ_OUT;
-            for (int t = 0; t < useFrames && t < ids.length; t++) mergedIds.add(ids[t]);
+            int useFrames = (ci < allArgmax.size() - 1) ? strideOut : SEQ_OUT;
+            int startT = (ci > 0) ? dropLeft : 0;
+            int endT = useFrames - ((ci < allArgmax.size() - 1) ? dropRight : 0);
+            for (int t = startT; t < endT && t < ids.length; t++) mergedIds.add(ids[t]);
         }
         int[] merged = new int[mergedIds.size()];
         for (int i = 0; i < merged.length; i++) merged[i] = mergedIds.get(i);

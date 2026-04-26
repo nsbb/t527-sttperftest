@@ -21,6 +21,33 @@ static float s_mel_filterbank[N_MELS][FFT_BINS];
 static kiss_fft_cfg s_fft_cfg = NULL;
 static int s_initialized = 0;
 
+// N series: per-feature normalization mode
+static int s_norm_mode = 0;       // 0=standard, 1=voiced-only, 2=floor-clamp, 3=noise-subtract
+static float s_voiced_pct = 30.0f; // percentile threshold for voiced detection
+static float s_floor_log = -8.0f;  // log-mel floor for mode 2
+
+void conformer_mel_set_norm_mode(int mode, float voiced_pct, float floor_log) {
+    s_norm_mode = mode;
+    s_voiced_pct = voiced_pct;
+    s_floor_log = floor_log;
+    LOGD("MEL_NORM mode=%d voiced_pct=%.1f floor_log=%.2f", mode, voiced_pct, floor_log);
+}
+
+// Helper: compute kth-smallest value (approximate via partial sort).
+static float percentile_inplace(float* buf, int n, float pct) {
+    int k = (int)((pct / 100.0f) * n);
+    if (k < 0) k = 0; if (k >= n) k = n - 1;
+    // Simple selection: insertion sort the first k+1 elements, scan rest
+    // For small arrays this is OK; n ~ a few hundred frames.
+    for (int i = 1; i < n; i++) {
+        float v = buf[i];
+        int j = i - 1;
+        while (j >= 0 && buf[j] > v) { buf[j+1] = buf[j]; j--; }
+        buf[j+1] = v;
+    }
+    return buf[k];
+}
+
 // Slaney mel scale
 static float hz_to_mel(float hz) {
     if (hz < 1000.0f)
@@ -306,22 +333,94 @@ int conformer_mel_compute_chunks(
         }
     }
 
-    // NeMo normalize="per_feature": normalize each mel bin over full utterance frames.
+    // N series mel-domain processing before per-feature normalization
+    if (s_norm_mode == 2) {
+        // Mode 2: floor clamp log-mel
+        for (int t = 0; t < n_frames; t++) {
+            for (int m = 0; m < N_MELS; m++) {
+                float v = mel_float[m * n_frames + t];
+                if (v < s_floor_log) v = s_floor_log;
+                mel_float[m * n_frames + t] = v;
+            }
+        }
+    } else if (s_norm_mode == 3) {
+        // Mode 3: subtract per-bin 5th percentile
+        float* tmp = (float*)malloc(n_frames * sizeof(float));
+        if (tmp) {
+            for (int m = 0; m < N_MELS; m++) {
+                for (int t = 0; t < n_frames; t++) tmp[t] = mel_float[m * n_frames + t];
+                float p5 = percentile_inplace(tmp, n_frames, 5.0f);
+                for (int t = 0; t < n_frames; t++) {
+                    float v = mel_float[m * n_frames + t] - p5;
+                    if (v < s_floor_log) v = s_floor_log;
+                    mel_float[m * n_frames + t] = v;
+                }
+            }
+            free(tmp);
+        }
+    }
+
+    // Identify voiced frames if mode 1 enabled
+    int* voiced_frame = NULL;
+    int n_voiced = n_frames;
+    if (s_norm_mode == 1 && n_frames > 10) {
+        float* total_e = (float*)malloc(n_frames * sizeof(float));
+        float* sorted_e = (float*)malloc(n_frames * sizeof(float));
+        voiced_frame = (int*)malloc(n_frames * sizeof(int));
+        if (total_e && sorted_e && voiced_frame) {
+            for (int t = 0; t < n_frames; t++) {
+                float s = 0.0f;
+                for (int m = 0; m < N_MELS; m++) s += mel_float[m * n_frames + t];
+                total_e[t] = s;
+                sorted_e[t] = s;
+            }
+            float thresh = percentile_inplace(sorted_e, n_frames, s_voiced_pct);
+            n_voiced = 0;
+            for (int t = 0; t < n_frames; t++) {
+                voiced_frame[t] = (total_e[t] >= thresh) ? 1 : 0;
+                if (voiced_frame[t]) n_voiced++;
+            }
+            if (n_voiced < 5) {
+                free(voiced_frame); voiced_frame = NULL; n_voiced = n_frames;
+            }
+        }
+        if (total_e) free(total_e);
+        if (sorted_e) free(sorted_e);
+    }
+
+    // Per-feature normalization
     for (int m = 0; m < N_MELS; m++) {
         float mean = 0.0f;
-        for (int t = 0; t < n_frames; t++) mean += mel_float[m * n_frames + t];
-        mean /= (float)n_frames;
+        if (voiced_frame) {
+            for (int t = 0; t < n_frames; t++) if (voiced_frame[t]) mean += mel_float[m * n_frames + t];
+            mean /= (float)n_voiced;
+        } else {
+            for (int t = 0; t < n_frames; t++) mean += mel_float[m * n_frames + t];
+            mean /= (float)n_frames;
+        }
 
         float var = 0.0f;
-        for (int t = 0; t < n_frames; t++) {
-            float diff = mel_float[m * n_frames + t] - mean;
-            var += diff * diff;
+        if (voiced_frame) {
+            for (int t = 0; t < n_frames; t++) {
+                if (voiced_frame[t]) {
+                    float d = mel_float[m * n_frames + t] - mean;
+                    var += d * d;
+                }
+            }
+            var /= (float)n_voiced;
+        } else {
+            for (int t = 0; t < n_frames; t++) {
+                float d = mel_float[m * n_frames + t] - mean;
+                var += d * d;
+            }
+            var /= (float)n_frames;
         }
-        float inv_std = 1.0f / (sqrtf(var / (float)n_frames) + 1e-5f);
+        float inv_std = 1.0f / (sqrtf(var) + 1e-5f);
         for (int t = 0; t < n_frames; t++) {
             mel_float[m * n_frames + t] = (mel_float[m * n_frames + t] - mean) * inv_std;
         }
     }
+    if (voiced_frame) free(voiced_frame);
 
     const int chunk_size = N_MELS * TIME_FRAMES;
     int chunk_idx = 0;

@@ -359,3 +359,10 @@ jfloatArray Java_com_t527_wav2vecdemo_conformer_AwConformerJni_nativeRunWakeword
     (*env)->SetFloatArrayRegion(env, result, 0, 2, probs);
     return result;
 }
+
+// N series: per-feature normalization mode setter
+JNIEXPORT JNICALL
+void Java_com_t527_wav2vecdemo_conformer_AwConformerJni_nativeSetMelNormMode(
+    JNIEnv *env, jclass thiz, jint mode, jfloat voicedPct, jfloat floorLog) {
+    conformer_mel_set_norm_mode((int)mode, (float)voicedPct, (float)floorLog);
+}

@@ -138,4 +138,7 @@ public class AwConformerJni {
     }
     private static native void nativeInitNpu();
     private static native void nativeReleaseNpu();
+
+    // N series: per-feature normalization mode setter (mel-domain processing)
+    public static native void nativeSetMelNormMode(int mode, float voicedPct, float floorLog);
 }

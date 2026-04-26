@@ -46,4 +46,12 @@ int conformer_mel_compute_chunks(
     float scale, int zero_point
 );
 
+// N series (USB mic): per-feature normalization mode.
+// 0 = standard per-bin mean/std over all frames (default)
+// 1 = voiced-only: identify voiced frames by total energy percentile threshold,
+//     compute mean/std using only voiced frames (silence noise excluded)
+// 2 = mel floor clamp before normalization (clamp log-mel below floor_log)
+// 3 = mel-domain noise subtract: subtract per-bin 5th percentile before normalization
+void conformer_mel_set_norm_mode(int mode, float voiced_pct, float floor_log);
+
 #endif // CONFORMER_MEL_H
