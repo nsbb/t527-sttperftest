@@ -1049,6 +1049,14 @@ public class VadPipelineService extends Service {
         int sStart = Math.max(0, (first - padFrames) * win);
         int eEnd = Math.min(x.length, (last + padFrames + 1) * win);
         if (eEnd - sStart >= x.length) return x;
+        // D4 guard: trim 결과가 너무 짧으면 원본 반환 — short 발화 과다 trim 방지.
+        float guardS = PerfTestConfig.MIC_TRIM_MIN_DUR_GUARD_S;
+        if (guardS > 0.0f && (eEnd - sStart) < (int)(guardS * SR_MODEL)) {
+            Log.d(TAG, String.format(java.util.Locale.US,
+                    "MIC_TRIM_GUARD: trimmed %.2fs < %.2fs guard, revert to original",
+                    (eEnd - sStart) / (float) SR_MODEL, guardS));
+            return x;
+        }
         float[] out = new float[eEnd - sStart];
         System.arraycopy(x, sStart, out, 0, out.length);
         Log.d(TAG, String.format(java.util.Locale.US,

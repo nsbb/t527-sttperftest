@@ -27,8 +27,11 @@ public final class PerfTestConfig {
     // mic 녹음은 broadcast→스피커→공기→mic acoustic latency로 leading silence가 ~500ms 더 김.
     // 호스트 검증에서 dataset 모드 CER 18.11% → 16.68% (-1.42 pp).
     public static final boolean MIC_TRIM_SILENCE = true;
-    public static final float MIC_TRIM_RMS_THRESH = 0.01f;
+    public static final float MIC_TRIM_RMS_THRESH = 0.008f;
     public static final int MIC_TRIM_PAD_MS = 80;
+    // D4 guard: trim 결과가 이 길이(초) 미만이면 원본 반환 (짧은 발화 보호).
+    // 0.0 = guard off. <2s 발화에서 과도 trim 방지 목적.
+    public static final float MIC_TRIM_MIN_DUR_GUARD_S = 0.0f;
     public static final int FIXED_CAPTURE_DEFAULT_MS = 4000;
     public static final int FIXED_CAPTURE_MAX_MS = 12000;
     // 파일 간 간격(ms). 재생/추론 안정화를 위한 텀.
