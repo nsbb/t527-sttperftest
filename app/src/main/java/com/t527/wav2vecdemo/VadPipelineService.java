@@ -370,13 +370,13 @@ public class VadPipelineService extends Service {
         int bufSize = Math.max(
                 AudioRecord.getMinBufferSize(SR_MIC, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT),
                 SR_MIC * 2 * 2);
-        AudioRecord recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION,
+        AudioRecord recorder = new AudioRecord(PerfTestConfig.MIC_AUDIO_SOURCE,
                 SR_MIC, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
         if (PerfTestConfig.MIC_DISABLE_AUDIO_EFFECTS) {
             disableAudioEffects(recorder.getAudioSessionId());
         }
         recorder.startRecording();
-        Log.d(TAG, "STT-only mic loop started. source=VOICE_RECOGNITION, AudioRecord state=" + recorder.getState());
+        Log.d(TAG, "STT-only mic loop started. source=" + PerfTestConfig.MIC_AUDIO_SOURCE + ", AudioRecord state=" + recorder.getState());
         short[] discard = new short[SR_MIC / 50];
 
         while (mRunning) {
@@ -771,10 +771,10 @@ public class VadPipelineService extends Service {
         int bufSize = Math.max(
                 AudioRecord.getMinBufferSize(SR_MIC, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT),
                 SR_MIC * 2 * 2);
-        AudioRecord recorder = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION,
+        AudioRecord recorder = new AudioRecord(PerfTestConfig.MIC_AUDIO_SOURCE,
                 SR_MIC, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize);
         recorder.startRecording();
-        Log.d(TAG, "AudioRecord: source=VOICE_RECOGNITION, rate=" + SR_MIC + ", state=" + recorder.getState());
+        Log.d(TAG, "AudioRecord: source=" + PerfTestConfig.MIC_AUDIO_SOURCE + ", rate=" + SR_MIC + ", state=" + recorder.getState());
         // NOTE: 새 월패드에서는 com.android.inputdevices 등 uid:1000 시스템 서비스가 UNPROCESSED로
         // mic을 항상 점유해서 silenced:true됨. 구 월패드(00f75c)에서는 정상 동작.
 

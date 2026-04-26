@@ -21,6 +21,8 @@ public final class PerfTestConfig {
     // 마이크 입력 실험용 전처리. direct WAV 경로에는 적용하지 않는다.
     public static final boolean MIC_PREPROCESS_FOR_STT = false;
     public static final boolean MIC_DISABLE_AUDIO_EFFECTS = false;
+    // 1=MIC, 6=VOICE_RECOGNITION, 7=VOICE_COMMUNICATION, 9=UNPROCESSED.
+    public static final int MIC_AUDIO_SOURCE = 0;  // T5 winner: DEFAULT
     public static final float MIC_PREPROCESS_TARGET_RMS = 0.045f;
     public static final float MIC_PREPROCESS_MAX_GAIN = 4.0f;
     // D1: leading/trailing silence를 제거해 mel 정규화 분포 shift를 완화.
@@ -48,7 +50,7 @@ public final class PerfTestConfig {
     public static final float MEL_NORM_FLOOR_LOG = -8.0f;
     // O series: chunk merge tuning. -1 = use default STRIDE_OUT (63).
     // 양수: chunk i (non-final)에서 처음 N 프레임 drop, useFrames = STRIDE_OUT - DROP_RIGHT.
-    public static final int CHUNK_DROP_LEFT = 2;  // P5 winner
+    public static final int CHUNK_DROP_LEFT = 2;
     public static final int CHUNK_DROP_RIGHT = 0;
     // STRIDE_OUT override. -1 = use default (63). P5 winner: 65.
     public static final int CHUNK_STRIDE_OUT_OVERRIDE = 65;

@@ -47,6 +47,7 @@ probe20 (20 sample, dataset 모드) 기준 비교. 단순화를 위해 변종별
 | Q | WPE dereverberation (nara_wpe) | Q1 wpe-only (taps=10) | 34.84 | -2.5pp 단독, K4 추가 효과 없음 |
 | R | spectral gating (noisereduce non-stationary) | R7 mild only | 27.63 | K4 단독 25.17보다 +2.5pp 나쁨 |
 | S | iterative K4, preemph variants, multi-HPF, lowshelf | S1 K4_twice | 26.43 | 모두 K4 못 이김 (S1=26.43, S4=37.90 worst) |
+| T | LIVE probe20 audio_source 변경 sweep (1/6/7/9/0) | T5 audio=0 DEFAULT | 26.64% (LIVE) | -1.87pp probe20, clean300에선 동일 (17.44%) |
 
 *D series는 DMIC에서 측정. USB는 nominally 응답하지만 효과 약함.
 **O/P는 long utterance(>=4.5s) subset 측정. 전체 평균은 K4와 거의 동일.
