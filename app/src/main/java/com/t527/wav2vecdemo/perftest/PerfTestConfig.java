@@ -28,15 +28,16 @@ public final class PerfTestConfig {
     // 호스트 검증에서 dataset 모드 CER 18.11% → 16.68% (-1.42 pp).
     public static final boolean MIC_TRIM_SILENCE = true;
     public static final float MIC_TRIM_RMS_THRESH = 0.008f;
-    public static final int MIC_TRIM_PAD_MS = 80;
+    public static final int MIC_TRIM_PAD_MS = 200;  // K4 winner
     // D4 guard: trim 결과가 이 길이(초) 미만이면 원본 반환 (짧은 발화 보호).
-    // 0.0 = guard off. <2s 발화에서 과도 trim 방지 목적.
     public static final float MIC_TRIM_MIN_DUR_GUARD_S = 0.0f;
-    // H series: 적응형 trim — noise floor 추정값(quietest 5%) × multiplier를 임계값으로.
-    // 0.0 = adaptive off (MIC_TRIM_RMS_THRESH 사용). H6 winner: 5.0
-    // USB mic처럼 노이즈가 변동하는 환경에서 효과적.
-    // 실제 사용 임계값 = max(noise_p5 * mult, MIC_TRIM_RMS_THRESH)
-    public static final float MIC_TRIM_ADAPTIVE_MULT = 5.0f;
+    // H/K series: 적응형 trim — noise floor 추정값(quietest 5%) × multiplier를 임계값으로.
+    // K4 winner: 4.0. 0.0 = adaptive off.
+    public static final float MIC_TRIM_ADAPTIVE_MULT = 4.0f;
+    // K series: signal-level high-pass filter cutoff (Hz). 0.0 = disabled.
+    // USB mic의 저주파 노이즈/룸 럼블 컷. K4 winner: 150 Hz.
+    public static final float MIC_HPF_CUTOFF_HZ = 150.0f;
+    public static final float MIC_HPF_Q = 0.7f;
     public static final int FIXED_CAPTURE_DEFAULT_MS = 4000;
     public static final int FIXED_CAPTURE_MAX_MS = 12000;
     // 파일 간 간격(ms). 재생/추론 안정화를 위한 텀.

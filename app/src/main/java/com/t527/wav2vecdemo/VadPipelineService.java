@@ -989,6 +989,10 @@ public class VadPipelineService extends Service {
     private float[] preprocessMicAudioForStt(float[] audio) {
         if (audio == null || audio.length == 0) return audio;
         float[] x = audio;
+        // K series: 저주파 노이즈/룸 럼블 컷 (USB mic 대상). HPF 150Hz가 sweet spot.
+        if (PerfTestConfig.MIC_HPF_CUTOFF_HZ > 0.0f) {
+            x = biquadHighpass(x, PerfTestConfig.MIC_HPF_CUTOFF_HZ, PerfTestConfig.MIC_HPF_Q);
+        }
         if (PerfTestConfig.MIC_TRIM_SILENCE) {
             x = trimSilenceRms(x);
         }
@@ -1023,6 +1027,31 @@ public class VadPipelineService extends Service {
                     rms, PerfTestConfig.MIC_PREPROCESS_TARGET_RMS, gain));
         }
         return out;
+    }
+
+    // K series: 2nd-order biquad HPF (RBJ cookbook). USB mic 저주파 노이즈 컷용.
+    private float[] biquadHighpass(float[] x, float fcHz, float q) {
+        if (x == null || x.length == 0) return x;
+        double omega = 2.0 * Math.PI * fcHz / SR_MODEL;
+        double cosw = Math.cos(omega), sinw = Math.sin(omega);
+        double alpha = sinw / (2.0 * q);
+        double b0 = (1.0 + cosw) / 2.0;
+        double b1 = -(1.0 + cosw);
+        double b2 = (1.0 + cosw) / 2.0;
+        double a0 = 1.0 + alpha;
+        double a1 = -2.0 * cosw;
+        double a2 = 1.0 - alpha;
+        b0 /= a0; b1 /= a0; b2 /= a0; a1 /= a0; a2 /= a0;
+        float[] y = new float[x.length];
+        double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+        for (int i = 0; i < x.length; i++) {
+            double xn = x[i];
+            double yn = b0 * xn + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            y[i] = (float) yn;
+            x2 = x1; x1 = xn;
+            y2 = y1; y1 = yn;
+        }
+        return y;
     }
 
     // D1: 10ms RMS-window 기반 leading/trailing silence trim.
