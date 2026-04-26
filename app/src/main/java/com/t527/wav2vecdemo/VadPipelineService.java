@@ -1033,13 +1033,31 @@ public class VadPipelineService extends Service {
         int win = SR_MODEL / 100; // 10ms @ 16k = 160 samples
         int n = x.length / win;
         if (n < 4) return x;
-        boolean[] voiced = new boolean[n];
-        final float thresh = PerfTestConfig.MIC_TRIM_RMS_THRESH;
+        // 1단계: 프레임별 RMS 계산
+        float[] rmsArr = new float[n];
         for (int i = 0; i < n; i++) {
             int s = i * win, e = (i + 1) * win;
             double sum = 0.0;
             for (int j = s; j < e; j++) sum += x[j] * x[j];
-            voiced[i] = Math.sqrt(sum / win) >= thresh;
+            rmsArr[i] = (float) Math.sqrt(sum / win);
+        }
+        // 2단계: 적응형 임계값 (H series): noise_p5 * mult.
+        // adaptive_mult=0 이면 기존 fixed thresh 사용.
+        float thresh = PerfTestConfig.MIC_TRIM_RMS_THRESH;
+        float adaptMult = PerfTestConfig.MIC_TRIM_ADAPTIVE_MULT;
+        if (adaptMult > 0.0f && n >= 10) {
+            float[] sortedRms = rmsArr.clone();
+            java.util.Arrays.sort(sortedRms);
+            float noiseP5 = sortedRms[Math.max(0, n / 20)]; // 5th percentile
+            float adaptiveThresh = noiseP5 * adaptMult;
+            thresh = Math.max(adaptiveThresh, PerfTestConfig.MIC_TRIM_RMS_THRESH);
+            Log.d(TAG, String.format(java.util.Locale.US,
+                    "MIC_TRIM_ADAPTIVE: noise_p5=%.5f mult=%.1f -> thresh=%.5f (floor=%.5f)",
+                    noiseP5, adaptMult, thresh, PerfTestConfig.MIC_TRIM_RMS_THRESH));
+        }
+        boolean[] voiced = new boolean[n];
+        for (int i = 0; i < n; i++) {
+            voiced[i] = rmsArr[i] >= thresh;
         }
         int first = -1, last = -1;
         for (int i = 0; i < n; i++) if (voiced[i]) { first = i; break; }
