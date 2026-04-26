@@ -44,7 +44,7 @@ probe20 (20 sample, dataset 모드) 기준 비교. 단순화를 위해 변종별
 | M | calibrated inverse EQ (USB→DIRECT) | broken | 37~88% | phase 문제 |
 | **N** | mel-domain normalization 변경 (JNI) | mode 0 (default) | 25.31 | **모델이 NeMo std에 학습**, voiced/floor/noise-sub 모두 악화 |
 | **O/P** | chunk merge stride/drop_left 변경 | P5 stride65+drop_left2 | 23.49** | long utterance만 효과 |
-| Q | WPE dereverberation (nara_wpe) | 진행 중 | TBD | 첫 시도는 RMS norm 누락으로 broken |
+| Q | WPE dereverberation (nara_wpe) | Q1 wpe-only (taps=10) | 34.84 | -2.5pp 단독, K4 추가 효과 없음 |
 
 *D series는 DMIC에서 측정. USB는 nominally 응답하지만 효과 약함.
 **O/P는 long utterance(>=4.5s) subset 측정. 전체 평균은 K4와 거의 동일.
@@ -153,9 +153,11 @@ USE_TORCHSCRIPT_STT_MEL = false;
 
 ## 9. 다음 에이전트가 시도할 것 (priority 순)
 
-### A. 진행 중 (Q series)
-- **WPE dereverberation** (`nara_wpe` Python package) — installed, single-channel, 첫 시도 broken (RMS norm 누락), 수정 중. Continue: `/tmp/gen_q_variants.py`, `/tmp/run_all_q.sh`
-- 단일 채널 WPE은 reverb 제거에 검증된 방법. 효과 확인되면 추가 변종 (taps/delay/iter sweep)
+### A. 시도 완료 (Q series — WPE 검증 완료)
+- WPE 단독: 34.84% (USB raw 37.34 → -2.5pp)
+- WPE + K4 조합: 25.58~29.56% (K4 단독 25.17%과 동급 또는 약간 나쁨)
+- **결론**: WPE의 dereverberation 효과는 K4의 HPF+adaptive trim에 이미 내포됨
+- shape 사용 주의: nara_wpe wpe_v8은 (F, D, T) 형태 요구 (D=mic 채널)
 
 ### B. 미시도 — 가능성 있음
 1. **Test-time augmentation (TTA)** — 같은 utterance를 다른 전처리로 N번 추론 → token-level voting
