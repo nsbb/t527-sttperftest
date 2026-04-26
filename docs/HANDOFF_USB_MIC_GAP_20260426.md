@@ -231,6 +231,28 @@ USE_TORCHSCRIPT_STT_MEL = false;
 - Dev kit 전원 ON 유지
 - Speaker gain = 0.2 고정
 
+## 12.1. 🎯 BREAKTHROUGH (2026-04-26 22:06): DMIC + K4 = 15.30%
+
+USB의 17%대 saturation은 USB 신호 품질 한계, K4 한계가 아님.
+
+| 측정 (clean300) | CER |
+|---|---:|
+| Direct WAV (gold) | 7.76% |
+| **DMIC + K4 dataset replay** | **15.30%** ← 새 최고 |
+| DMIC LIVE Apr24 (no K4) | 17.96% (이전 baseline) |
+| USB K4 LIVE | 17.48% |
+
+DMIC는 USB보다 신호 품질 압도적 우수 (peak 0.89 vs 0.32, SNR 38dB vs 14dB, 음성대역 -5dB vs -20dB).
+K4 (HPF150 + adaptive trim 4x + pad 200) 적용 시 -2.66pp 추가 개선.
+
+Per-duration:
+- <2s: DMIC K4 21.24% (USB K4 28.31%, **-7pp 개선**) — short utterance가 큰 차이
+- 2-3s: DMIC 9.14% (USB 8.37%)
+- 3-4.5s: DMIC 14.31% (USB 14.21%)
+- ≥4.5s: DMIC 22.59% (USB 23.69%)
+
+**제품 wallpad DMIC + K4가 진짜 production 결과**. USB 측정값(17.48%)보다 -2.18pp 우수.
+
 ## 13. 핵심 메시지
 
 신호 도메인에서 K4(17.48% LIVE)가 saturation. 모델 측 (mel-domain) 변경은 학습 분포 깨서 악화.
