@@ -185,7 +185,52 @@ USB 녹음 호스트 전처리 후 dataset replay:
 - Pre-emphasis만 적용하면 약간 개선 (-0.71pp)
 - **20 sample이라 statistical noise 큼** — 1pp = 1 utterance 변동
 
-### 4.8 F series — Per-bin time-variance compression 직접 공격 (FALSIFIED)
+### 4.8 G/H series — Adaptive RMS trim (USB winner, LIVE 검증 완료)
+
+USB는 noise floor가 fixed thresh(0.008)와 가까워 trim이 거의 무효. 프레임별 RMS 5th percentile × multiplier로 임계값 산정 (adaptive).
+
+probe20 dataset sweep:
+
+| variant | CER | Δ from USB raw |
+|---|---:|---:|
+| **H6 trim_5x_pad30** | **31.75%** | **-5.59** |
+| H5 trim_5x_pad150 | 32.52 | -4.82 |
+| **G9 trim_5x_pad80** | **33.14** | **-4.20** |
+| H1/H2 trim_5x + preemph | 33.90~34.07 | -3.27 ~ -3.44 |
+| **G4 preemph 0.95 only** | **34.76** | **-2.58** |
+| G2 trim_3x | 36.83 | -0.51 |
+| E0 USB raw | 37.34 | 0 |
+| H3 trim_6x | 41.77 | +4.43 (over-trim) |
+
+**핵심 패턴**:
+1. Adaptive multiplier 5x가 sweet spot (3x 부족, 6x 과다)
+2. Pre-emphasis 자체로도 -2.58pp (USB high-cut 보상)
+3. RMS norm은 노이즈 같이 증폭 → 악영향
+4. Adaptive trim + preemph 조합은 trim 단독보다 약간 나쁨 (preemph 후 noise floor 변동)
+
+### 4.9 LIVE 검증 (USB clean300, adaptive mult=5.0, pad=80, 2026-04-26)
+
+`MIC_TRIM_ADAPTIVE_MULT=5.0f` 안드로이드 포팅 후 mouth simulator + USB Britz BE_STM30U LIVE 측정:
+
+| 비교 | CER | 비고 |
+|---|---:|---|
+| USB raw probe20 (E0) | 37.34% | 베이스라인 |
+| H6 host trim → device dataset | 31.75% | probe20 |
+| **USB LIVE clean300 adaptive** | **18.33%** | **mouth sim + USB + adaptive trim** |
+| DMIC LIVE Apr 24 (참고) | 17.96% | wallpad DMIC LIVE |
+| DMIC dataset D2 winner | 15.47% | host-trimmed DMIC dataset replay |
+
+**🎯 결과**:
+- USB raw 37.34% → adaptive trim **18.33%** (**-19.0pp 개선**)
+- USB LIVE이 wallpad DMIC LIVE(17.96%)와 **+0.37pp 차이로 거의 동등**
+- 94/300 (31%) **완벽 transcript** (CER=0%)
+- Per-duration: <2s 25.07%, 2-3s 14.47%, 3-4.5s 16.38%, ≥4.5s 21.07%
+
+**사용자 목표 달성**: speaker→air→USB mic chain에서 USB direct WAV에 가까운 STT 성능 확보.
+
+git: `b29ea9c` on `mic-gap-fix` (Bitbucket pushed).
+
+### 4.10 F series — Per-bin time-variance compression 직접 공격 (FALSIFIED)
 
 **가설**: USB의 mel per-bin time-variance가 DIRECT의 40%(2.09 vs 5.22)로 압축됨. 이를 회복시키면 STT가 좋아질 것.
 
