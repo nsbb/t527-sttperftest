@@ -46,6 +46,7 @@ probe20 (20 sample, dataset 모드) 기준 비교. 단순화를 위해 변종별
 | **O/P** | chunk merge stride/drop_left 변경 | P5 stride65+drop_left2 | 23.49** | long utterance만 효과 |
 | Q | WPE dereverberation (nara_wpe) | Q1 wpe-only (taps=10) | 34.84 | -2.5pp 단독, K4 추가 효과 없음 |
 | R | spectral gating (noisereduce non-stationary) | R7 mild only | 27.63 | K4 단독 25.17보다 +2.5pp 나쁨 |
+| S | iterative K4, preemph variants, multi-HPF, lowshelf | S1 K4_twice | 26.43 | 모두 K4 못 이김 (S1=26.43, S4=37.90 worst) |
 
 *D series는 DMIC에서 측정. USB는 nominally 응답하지만 효과 약함.
 **O/P는 long utterance(>=4.5s) subset 측정. 전체 평균은 K4와 거의 동일.
@@ -155,11 +156,13 @@ USE_TORCHSCRIPT_STT_MEL = false;
 ## 9. 다음 에이전트가 시도할 것 (priority 순)
 
 ### A. 시도 완료 — 신호 도메인 saturation 최종 확인
-- **Q series (WPE dereverberation)**: 단독 -2.5pp, K4 추가 효과 없음
-- **R series (noisereduce spectral gating)**: 단독 -8pp 개선 (R6 28.94%), K4 +2.5pp 나쁨 (R4)
-- **결론**: 라이브러리 기반 speech enhancement (WPE, spectral gating, MMSE) 모두 K4 단독(25.17% probe20 dataset, 17.48% LIVE clean300)을 못 이김
+- **Q series (WPE dereverberation, nara_wpe)**: 단독 -2.5pp, K4 추가 효과 없음
+- **R series (noisereduce spectral gating, non-stat/stat)**: 단독 -8pp 개선 (R6 28.94%), K4 +2.5pp 나쁨 (R4)
+- **S series (iterative K4, multi-preemph, multi-HPF, lowshelf)**: 모두 K4 못 이김
+- **결론**: 신호 도메인 inference-time 처리 90+ 변종 검증 → K4 (25.17% probe20 dataset, 17.48% LIVE clean300)이 global optimum
 - 이유: K4의 HPF150 + adaptive trim 4x + pad 200 자체가 reverb tail 영향과 silence ratio shift를 동시에 줄임
 - 더 정교한 enhancement (MetricGAN+, DeepFilterNet)는 NPU 임베디드에 무거움 + 학습 분포 의존
+- **유일한 진정한 진척 경로 = 모델 측 변경** (재학습/finetune/TorchScript NeMo mel)
 
 ### B. 미시도 — 가능성 있음
 1. **Test-time augmentation (TTA)** — 같은 utterance를 다른 전처리로 N번 추론 → token-level voting
