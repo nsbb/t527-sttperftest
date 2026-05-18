@@ -80,6 +80,110 @@ local.properties.bak_beam_230647
 
 ## 코드 변경 핵심
 
+## 성능이 처음 구렸다가 다시 좋아진 이유
+
+이번 코드 변경은 "mel 하나만 바꾼 것"이 아니다. 성능 개선은 아래 3단계가 겹친 결과다.
+
+### 1. direct WAV 성능 개선 - mel/chunk 구조 수정
+
+초기 문제:
+
+```text
+3초 audio chunk마다 mel 추출/정규화
+마지막 chunk의 padding도 정규화에 섞임
+서버 NeMo 평가 방식과 달라져 direct clean도 13%대까지 악화
+```
+
+수정 방향:
+
+```text
+전체 utterance 기준으로 mel 한 번 추출
+전체 utterance 기준 per-feature normalize
+그 다음 301-frame window / 250-frame stride로 chunk
+마지막 부족분은 정규화 후 0 pad
+```
+
+결과:
+
+```text
+clean300 direct CER가 약 13.05% → 8.02% 수준으로 개선됨
+```
+
+주의:
+
+```text
+TorchScript NeMo mel로 바꾼 것이 아니다.
+native C/KissFFT mel을 NeMo-compatible 구조로 수정한 것이다.
+```
+
+### 2. 마이크 입력 성능 개선 - K4 보정
+
+초기 문제:
+
+```text
+스피커→공기→마이크 경로를 지나면서 leading/trailing silence,
+저주파 노이즈, 룸 울림, noise floor가 들어와 CER가 크게 악화됨.
+```
+
+K4 수정:
+
+```text
+MIC_AUDIO_SOURCE = 0
+MIC_HPF_CUTOFF_HZ = 150.0f
+MIC_TRIM_SILENCE = true
+MIC_TRIM_ADAPTIVE_MULT = 4.0f
+MIC_TRIM_PAD_MS = 200
+```
+
+의미:
+
+```text
+HPF 150 Hz로 저주파 노이즈/룸 럼블 제거
+adaptive RMS trim으로 불필요한 silence 제거
+pad 200 ms로 말 앞뒤 잘림 방지
+```
+
+결과:
+
+```text
+USB live clean300에서 raw 대비 CER가 명확히 개선됨.
+4월 26일 K4 live clean300은 약 17%대까지 내려갔음.
+```
+
+### 3. 긴 문장 개선 - P5 chunk merge 보정
+
+초기 문제:
+
+```text
+3초 이상 긴 문장에서 chunk 경계 근처 누락/치환이 큼.
+뒤쪽 150개 샘플에서 CER가 크게 튀던 현상과 연결됨.
+```
+
+P5 수정:
+
+```text
+CHUNK_DROP_LEFT = 2
+CHUNK_DROP_RIGHT = 0
+CHUNK_STRIDE_OUT_OVERRIDE = 65
+```
+
+의미:
+
+```text
+chunk별 NPU 출력 frame merge 방식을 조정해서
+경계 부근 token 손실을 줄이려는 보정이다.
+```
+
+결론:
+
+```text
+성능 개선 핵심은 다음 3개다.
+
+1. direct WAV: full-utterance NeMo-compatible native mel/chunk
+2. mic 입력: HPF150 + adaptive trim 4x + pad200
+3. 긴 문장: dropLeft2 + strideOut65
+```
+
 ### 1. STT mel 경로
 
 현재 설정:
