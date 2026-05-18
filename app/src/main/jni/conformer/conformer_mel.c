@@ -22,15 +22,53 @@ static kiss_fft_cfg s_fft_cfg = NULL;
 static int s_initialized = 0;
 
 // N series: per-feature normalization mode
-static int s_norm_mode = 0;       // 0=standard, 1=voiced-only, 2=floor-clamp, 3=noise-subtract
+static int s_norm_mode = 0;       // 0=standard, 1=voiced-only, 2=floor-clamp, 3=noise-subtract, 4=HEQ
 static float s_voiced_pct = 30.0f; // percentile threshold for voiced detection
 static float s_floor_log = -8.0f;  // log-mel floor for mode 2
+
+// HEQ CDFs (mode 4)
+static float* s_heq_cdf_src = NULL;   // (N_MELS, n_quantiles)
+static float* s_heq_cdf_dst = NULL;
+static int s_heq_n_quantiles = 0;
 
 void conformer_mel_set_norm_mode(int mode, float voiced_pct, float floor_log) {
     s_norm_mode = mode;
     s_voiced_pct = voiced_pct;
     s_floor_log = floor_log;
     LOGD("MEL_NORM mode=%d voiced_pct=%.1f floor_log=%.2f", mode, voiced_pct, floor_log);
+}
+
+void conformer_mel_set_heq_cdf(const float* cdf_src, const float* cdf_dst, int n_quantiles) {
+    if (s_heq_cdf_src) { free(s_heq_cdf_src); s_heq_cdf_src = NULL; }
+    if (s_heq_cdf_dst) { free(s_heq_cdf_dst); s_heq_cdf_dst = NULL; }
+    s_heq_n_quantiles = 0;
+    if (!cdf_src || !cdf_dst || n_quantiles <= 0) {
+        LOGD("HEQ CDFs cleared");
+        return;
+    }
+    int total = N_MELS * n_quantiles;
+    s_heq_cdf_src = (float*)malloc(total * sizeof(float));
+    s_heq_cdf_dst = (float*)malloc(total * sizeof(float));
+    if (!s_heq_cdf_src || !s_heq_cdf_dst) {
+        if (s_heq_cdf_src) { free(s_heq_cdf_src); s_heq_cdf_src = NULL; }
+        if (s_heq_cdf_dst) { free(s_heq_cdf_dst); s_heq_cdf_dst = NULL; }
+        return;
+    }
+    memcpy(s_heq_cdf_src, cdf_src, total * sizeof(float));
+    memcpy(s_heq_cdf_dst, cdf_dst, total * sizeof(float));
+    s_heq_n_quantiles = n_quantiles;
+    LOGD("HEQ CDFs loaded: %d quantiles per bin", n_quantiles);
+}
+
+// Binary search for value in sorted array, returns index of largest value <= target.
+static int heq_search(const float* sorted, int n, float v) {
+    int lo = 0, hi = n - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (sorted[mid] <= v) lo = mid;
+        else hi = mid - 1;
+    }
+    return lo;
 }
 
 // Helper: compute kth-smallest value (approximate via partial sort).
@@ -341,6 +379,17 @@ int conformer_mel_compute_chunks(
                 float v = mel_float[m * n_frames + t];
                 if (v < s_floor_log) v = s_floor_log;
                 mel_float[m * n_frames + t] = v;
+            }
+        }
+    } else if (s_norm_mode == 4 && s_heq_cdf_src && s_heq_cdf_dst && s_heq_n_quantiles > 0) {
+        // Mode 4: per-bin HEQ — map src value via CDF rank to target CDF value
+        for (int m = 0; m < N_MELS; m++) {
+            const float* cs = s_heq_cdf_src + m * s_heq_n_quantiles;
+            const float* cd = s_heq_cdf_dst + m * s_heq_n_quantiles;
+            for (int t = 0; t < n_frames; t++) {
+                float v = mel_float[m * n_frames + t];
+                int rank = heq_search(cs, s_heq_n_quantiles, v);
+                mel_float[m * n_frames + t] = cd[rank];
             }
         }
     } else if (s_norm_mode == 3) {

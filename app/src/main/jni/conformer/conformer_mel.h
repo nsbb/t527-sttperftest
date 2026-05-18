@@ -52,6 +52,12 @@ int conformer_mel_compute_chunks(
 //     compute mean/std using only voiced frames (silence noise excluded)
 // 2 = mel floor clamp before normalization (clamp log-mel below floor_log)
 // 3 = mel-domain noise subtract: subtract per-bin 5th percentile before normalization
+// 4 = HEQ (Histogram Equalization): per-bin map source CDF -> target CDF before per-feature norm
 void conformer_mel_set_norm_mode(int mode, float voiced_pct, float floor_log);
+
+// HEQ CDFs: per-bin sorted quantile arrays. cdf_src/cdf_dst shape = (N_MELS=80, n_quantiles).
+// Both arrays must contain N_MELS * n_quantiles floats laid out as [bin0_q0, bin0_q1, ..., bin0_qN, bin1_q0, ...]
+// Pass null to disable HEQ.
+void conformer_mel_set_heq_cdf(const float* cdf_src, const float* cdf_dst, int n_quantiles);
 
 #endif // CONFORMER_MEL_H

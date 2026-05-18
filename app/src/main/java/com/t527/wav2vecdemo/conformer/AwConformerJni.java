@@ -47,6 +47,16 @@ public class AwConformerJni {
     }
 
     /**
+     * Run NPU and return RAW float logits [76 * 2049] for CTC beam search.
+     * Layout: time-major, output[t * VOCAB_SIZE + v] = log-prob style score.
+     */
+    public float[] runLogits(byte[] uint8Mel) {
+        if (mNativePtr == 0) return null;
+        return nativeRunLogits(mNativePtr, uint8Mel);
+    }
+
+
+    /**
      * Run NPU with .dat file path (for testing with pre-computed NeMo mel)
      * @return argmax token IDs [76] for CTC decoding in Java
      */
@@ -91,6 +101,7 @@ public class AwConformerJni {
     private native long nativeNew(String modelPath);
     private native void nativeDelete(long ptr);
     private native int[] nativeRunUint8(long ptr, byte[] uint8Mel);
+    private native float[] nativeRunLogits(long ptr, byte[] uint8Mel);
     private native int[] nativeRunDatFile(long ptr, String datPath);
     private native byte[] nativeComputeMel(float[] audio16k, int audioLen, float scale, int zeroPoint);
     private native byte[] nativeComputeMelChunks(float[] audio16k, int audioLen, float scale, int zeroPoint);
@@ -141,4 +152,7 @@ public class AwConformerJni {
 
     // N series: per-feature normalization mode setter (mel-domain processing)
     public static native void nativeSetMelNormMode(int mode, float voicedPct, float floorLog);
+
+    // HEQ CDFs setter (mode 4). cdfSrc/cdfDst length = N_MELS * nQuantiles. null to clear.
+    public static native void nativeSetMelHeqCdf(float[] cdfSrc, float[] cdfDst, int nQuantiles);
 }

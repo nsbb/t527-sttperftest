@@ -8,7 +8,7 @@ public final class PerfTestConfig {
     // false: 실전 모드 (원본 동작)
     public static final boolean PERF_TEST_MODE = true;
     // true: VT/VAD 루프를 사용하지 않고 테스트셋 WAV 파일을 직접 STT 추론.
-    public static final boolean STT_ONLY_DATASET_MODE = false;
+    public static final boolean STT_ONLY_DATASET_MODE = false;  // live mic probe
     // true: 각 테스트셋 파일을 추론 전에 스피커로 재생.
     public static final boolean PLAY_AUDIO_BEFORE_INFER = false;
     // false: Python 스피커 재생 + 마이크 측정 모드에서 VAD를 쓰지 않고 파일 길이 기반 고정 녹음.
@@ -45,7 +45,7 @@ public final class PerfTestConfig {
     // 1 = voiced-only: identify voiced frames by total-energy percentile, normalize using only those
     // 2 = floor-clamp log-mel before normalization
     // 3 = subtract per-bin 5th percentile before normalization (mel-domain noise subtract)
-    public static final int MEL_NORM_MODE = 0;
+    public static final int MEL_NORM_MODE = 0;  // standard
     public static final float MEL_NORM_VOICED_PCT = 30.0f;
     public static final float MEL_NORM_FLOOR_LOG = -8.0f;
     // O series: chunk merge tuning. -1 = use default STRIDE_OUT (63).
@@ -54,6 +54,11 @@ public final class PerfTestConfig {
     public static final int CHUNK_DROP_RIGHT = 0;
     // STRIDE_OUT override. -1 = use default (63). P5 winner: 65.
     public static final int CHUNK_STRIDE_OUT_OVERRIDE = 65;
+    // ===== CTC Beam Search (Phase 1) =====
+    // false: 기존 greedy argmax. true: runLogits + beam search.
+    public static final boolean USE_BEAM_SEARCH = false;
+    public static final int BEAM_WIDTH = 1;        // sweep
+    public static final int BEAM_TOPK_PRUNE = 64;  // per-step vocab pruning (16~64)
     public static final int FIXED_CAPTURE_DEFAULT_MS = 4000;
     public static final int FIXED_CAPTURE_MAX_MS = 12000;
     // 파일 간 간격(ms). 재생/추론 안정화를 위한 텀.

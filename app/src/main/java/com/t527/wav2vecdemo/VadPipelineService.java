@@ -274,6 +274,34 @@ public class VadPipelineService extends Service {
                 PerfTestConfig.MEL_NORM_MODE,
                 PerfTestConfig.MEL_NORM_VOICED_PCT,
                 PerfTestConfig.MEL_NORM_FLOOR_LOG);
+        // HEQ (mode 4): load CDFs from /sdcard if mode==4
+        if (PerfTestConfig.MEL_NORM_MODE == 4) {
+            try {
+                java.io.File srcF = new java.io.File(PerfTestConfig.ROOT_DIR + "/heq_cdf_src.bin");
+                java.io.File dstF = new java.io.File(PerfTestConfig.ROOT_DIR + "/heq_cdf_dst.bin");
+                if (srcF.exists() && dstF.exists()) {
+                    long fsize = srcF.length();
+                    int nFloats = (int)(fsize / 4);
+                    int nMels = 80;
+                    int nQ = nFloats / nMels;
+                    java.io.FileInputStream fis = new java.io.FileInputStream(srcF);
+                    byte[] buf = new byte[(int)fsize];
+                    fis.read(buf); fis.close();
+                    java.nio.FloatBuffer fb = java.nio.ByteBuffer.wrap(buf).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
+                    float[] cdfSrc = new float[nFloats]; fb.get(cdfSrc);
+                    fis = new java.io.FileInputStream(dstF);
+                    fis.read(buf); fis.close();
+                    fb = java.nio.ByteBuffer.wrap(buf).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer();
+                    float[] cdfDst = new float[nFloats]; fb.get(cdfDst);
+                    AwConformerJni.nativeSetMelHeqCdf(cdfSrc, cdfDst, nQ);
+                    Log.d(TAG, "HEQ CDFs loaded: nMels=" + nMels + " nQ=" + nQ);
+                } else {
+                    Log.w(TAG, "HEQ MODE=4 but CDF files missing — fallback to standard");
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "HEQ CDF load failed: " + e.getMessage());
+            }
+        }
         mJni = new AwConformerJni();
         boolean confOk = mJni.init(confNb);
 
@@ -626,6 +654,29 @@ public class VadPipelineService extends Service {
         long tNpuTotal = 0;
         int numChunks = 0;
 
+        int strideOut = (PerfTestConfig.CHUNK_STRIDE_OUT_OVERRIDE > 0)
+                ? PerfTestConfig.CHUNK_STRIDE_OUT_OVERRIDE : STRIDE_OUT;
+        int dropLeft = Math.max(0, PerfTestConfig.CHUNK_DROP_LEFT);
+        int dropRight = Math.max(0, PerfTestConfig.CHUNK_DROP_RIGHT);
+
+        if (PerfTestConfig.USE_BEAM_SEARCH) {
+            List<float[]> allLogits = new ArrayList<>();
+            int sf = 0;
+            while (sf < fullMel.nFrames) {
+                byte[] mel = mSttMel.quantizeChunk(fullMel, sf, CONF_MEL_SCALE, CONF_MEL_ZP);
+                long tN0 = System.currentTimeMillis();
+                float[] lg = mJni.runLogits(mel);
+                long tN1 = System.currentTimeMillis();
+                tNpuTotal += (tN1 - tN0);
+                if (lg != null) allLogits.add(lg);
+                numChunks++;
+                if (sf + WINDOW_FRAMES >= fullMel.nFrames) break;
+                sf += STRIDE_FRAMES;
+            }
+            return runBeamSearchOverChunks(allLogits, tM1 - tM0, tNpuTotal, numChunks,
+                    strideOut, dropLeft, dropRight);
+        }
+
         int startFrame = 0;
         while (startFrame < fullMel.nFrames) {
             byte[] mel = mSttMel.quantizeChunk(fullMel, startFrame, CONF_MEL_SCALE, CONF_MEL_ZP);
@@ -642,11 +693,6 @@ public class VadPipelineService extends Service {
         }
 
         List<Integer> mergedIds = new ArrayList<>();
-        // O series: configurable chunk merge with drop_left/drop_right and stride_out override
-        int strideOut = (PerfTestConfig.CHUNK_STRIDE_OUT_OVERRIDE > 0)
-                ? PerfTestConfig.CHUNK_STRIDE_OUT_OVERRIDE : STRIDE_OUT;
-        int dropLeft = Math.max(0, PerfTestConfig.CHUNK_DROP_LEFT);
-        int dropRight = Math.max(0, PerfTestConfig.CHUNK_DROP_RIGHT);
         for (int ci = 0; ci < allArgmax.size(); ci++) {
             int[] ids = allArgmax.get(ci);
             int useFrames = (ci < allArgmax.size() - 1) ? strideOut : SEQ_OUT;
@@ -672,24 +718,40 @@ public class VadPipelineService extends Service {
 
         final int chunkSize = CONF_MEL_BINS * WINDOW_FRAMES;
         int numChunks = melChunks == null ? 0 : melChunks.length / chunkSize;
-        for (int ci = 0; ci < numChunks; ci++) {
-            byte[] mel = new byte[chunkSize];
-            System.arraycopy(melChunks, ci * chunkSize, mel, 0, chunkSize);
 
-            long tN0 = System.currentTimeMillis();
-            int[] argmax = mJni.runUint8(mel);
-            long tN1 = System.currentTimeMillis();
-            tNpuTotal += (tN1 - tN0);
-
-            if (argmax != null) allArgmax.add(argmax);
-        }
-
-        List<Integer> mergedIds = new ArrayList<>();
         // O series: configurable chunk merge with drop_left/drop_right and stride_out override
         int strideOut = (PerfTestConfig.CHUNK_STRIDE_OUT_OVERRIDE > 0)
                 ? PerfTestConfig.CHUNK_STRIDE_OUT_OVERRIDE : STRIDE_OUT;
         int dropLeft = Math.max(0, PerfTestConfig.CHUNK_DROP_LEFT);
         int dropRight = Math.max(0, PerfTestConfig.CHUNK_DROP_RIGHT);
+
+        if (PerfTestConfig.USE_BEAM_SEARCH) {
+            // Phase 1: float logits → beam search
+            List<float[]> allLogits = new ArrayList<>();
+            for (int ci = 0; ci < numChunks; ci++) {
+                byte[] mel = new byte[chunkSize];
+                System.arraycopy(melChunks, ci * chunkSize, mel, 0, chunkSize);
+                long tN0 = System.currentTimeMillis();
+                float[] lg = mJni.runLogits(mel);
+                long tN1 = System.currentTimeMillis();
+                tNpuTotal += (tN1 - tN0);
+                if (lg != null) allLogits.add(lg);
+            }
+            return runBeamSearchOverChunks(allLogits, tMelTotal, tNpuTotal, numChunks,
+                    strideOut, dropLeft, dropRight);
+        }
+
+        for (int ci = 0; ci < numChunks; ci++) {
+            byte[] mel = new byte[chunkSize];
+            System.arraycopy(melChunks, ci * chunkSize, mel, 0, chunkSize);
+            long tN0 = System.currentTimeMillis();
+            int[] argmax = mJni.runUint8(mel);
+            long tN1 = System.currentTimeMillis();
+            tNpuTotal += (tN1 - tN0);
+            if (argmax != null) allArgmax.add(argmax);
+        }
+
+        List<Integer> mergedIds = new ArrayList<>();
         for (int ci = 0; ci < allArgmax.size(); ci++) {
             int[] ids = allArgmax.get(ci);
             int useFrames = (ci < allArgmax.size() - 1) ? strideOut : SEQ_OUT;
@@ -701,6 +763,48 @@ public class VadPipelineService extends Service {
         for (int i = 0; i < merged.length; i++) merged[i] = mergedIds.get(i);
 
         return new SttResult(mDecoder.decode(merged), tMelTotal, tNpuTotal, numChunks);
+    }
+
+    /** Phase 1: merge per-chunk logits and run CTC beam search. */
+    private SttResult runBeamSearchOverChunks(List<float[]> allLogits,
+                                              long melMs, long npuMs, int numChunks,
+                                              int strideOut, int dropLeft, int dropRight) {
+        if (allLogits.isEmpty()) return new SttResult("", melMs, npuMs, numChunks);
+
+        final int V = 2049;  // ConformerDecoder.VOCAB_SIZE
+        // Compute kept frames per chunk
+        int totalFrames = 0;
+        int[] startTs = new int[allLogits.size()];
+        int[] endTs   = new int[allLogits.size()];
+        for (int ci = 0; ci < allLogits.size(); ci++) {
+            int useFrames = (ci < allLogits.size() - 1) ? strideOut : SEQ_OUT;
+            int startT = (ci > 0) ? dropLeft : 0;
+            int endT = useFrames - ((ci < allLogits.size() - 1) ? dropRight : 0);
+            if (endT < startT) endT = startT;
+            startTs[ci] = startT;
+            endTs[ci]   = endT;
+            totalFrames += (endT - startT);
+        }
+
+        float[] merged = new float[totalFrames * V];
+        int dstFrame = 0;
+        for (int ci = 0; ci < allLogits.size(); ci++) {
+            float[] src = allLogits.get(ci);
+            int n = endTs[ci] - startTs[ci];
+            if (n <= 0) continue;
+            System.arraycopy(src, startTs[ci] * V, merged, dstFrame * V, n * V);
+            dstFrame += n;
+        }
+
+        long tD0 = System.currentTimeMillis();
+        int[] tokens = mDecoder.beamSearch(merged, totalFrames, V,
+                PerfTestConfig.BEAM_WIDTH, PerfTestConfig.BEAM_TOPK_PRUNE);
+        long tD1 = System.currentTimeMillis();
+        Log.d(TAG, "BeamSearch: T=" + totalFrames + " W=" + PerfTestConfig.BEAM_WIDTH +
+                " topK=" + PerfTestConfig.BEAM_TOPK_PRUNE + " t=" + (tD1 - tD0) + "ms tokens=" +
+                (tokens != null ? tokens.length : -1));
+
+        return new SttResult(mDecoder.decodeFromBeam(tokens), melMs, npuMs, numChunks);
     }
 
     private void playPcm16(short[] pcm16, int sampleRate) {

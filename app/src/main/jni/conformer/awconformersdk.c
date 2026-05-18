@@ -196,6 +196,42 @@ jintArray Java_com_t527_wav2vecdemo_conformer_AwConformerJni_nativeRunDatFile(
         env, thiz, nativePtr, arr);
 }
 
+// Run NPU and return RAW float logits (no argmax) for CTC beam search.
+// Returns float[SEQ_OUT * VOCAB_SIZE] = float[76 * 2049], time-major.
+// Matches nativeRunUint8 layout discovery (output is time-major).
+JNIEXPORT JNICALL
+jfloatArray Java_com_t527_wav2vecdemo_conformer_AwConformerJni_nativeRunLogits(
+    JNIEnv *env, jobject thiz, jlong nativePtr, jbyteArray uint8Mel) {
+    AwConformer *ptr = (AwConformer *)(long)nativePtr;
+    Awnn_Context_t *context = ptr->context;
+
+    jsize len = (*env)->GetArrayLength(env, uint8Mel);
+    LOGD("Conformer nativeRunLogits: %d bytes (expected %d)", (int)len, MEL_BINS * TIME_FRAMES);
+
+    unsigned char *input = (unsigned char *)calloc(MEL_BINS * TIME_FRAMES + 4096, 1);
+    (*env)->GetByteArrayRegion(env, uint8Mel, 0, len, (jbyte *)input);
+
+    struct timespec t1, t2;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    unsigned char *input_buffers[1] = { input };
+    awnn_set_input_buffers(context, input_buffers);
+    awnn_run(context);
+
+    clock_gettime(CLOCK_MONOTONIC, &t2);
+    double ms = (t2.tv_sec - t1.tv_sec) * 1000.0 + (t2.tv_nsec - t1.tv_nsec) / 1e6;
+    LOGD("Conformer NPU inference (logits): %.1f ms", ms);
+
+    float **results = awnn_get_output_buffers(context);
+    const float *output = results[0];  // time-major [SEQ_OUT * VOCAB_SIZE]
+
+    free(input);
+
+    jfloatArray result = (*env)->NewFloatArray(env, SEQ_OUT * VOCAB_SIZE);
+    (*env)->SetFloatArrayRegion(env, result, 0, SEQ_OUT * VOCAB_SIZE, output);
+    return result;
+}
+
 // Compute mel from 16kHz float audio → uint8 mel bytes
 JNIEXPORT JNICALL
 jbyteArray Java_com_t527_wav2vecdemo_conformer_AwConformerJni_nativeComputeMel(
@@ -365,4 +401,23 @@ JNIEXPORT JNICALL
 void Java_com_t527_wav2vecdemo_conformer_AwConformerJni_nativeSetMelNormMode(
     JNIEnv *env, jclass thiz, jint mode, jfloat voicedPct, jfloat floorLog) {
     conformer_mel_set_norm_mode((int)mode, (float)voicedPct, (float)floorLog);
+}
+
+// HEQ CDFs setter
+JNIEXPORT JNICALL
+void Java_com_t527_wav2vecdemo_conformer_AwConformerJni_nativeSetMelHeqCdf(
+    JNIEnv *env, jclass thiz, jfloatArray cdfSrc, jfloatArray cdfDst, jint nQuantiles) {
+    if (cdfSrc == NULL || cdfDst == NULL || nQuantiles <= 0) {
+        conformer_mel_set_heq_cdf(NULL, NULL, 0);
+        return;
+    }
+    jsize lenSrc = (*env)->GetArrayLength(env, cdfSrc);
+    jsize lenDst = (*env)->GetArrayLength(env, cdfDst);
+    if (lenSrc != lenDst || lenSrc % nQuantiles != 0) return;
+    float *src = (float*)malloc(lenSrc * sizeof(float));
+    float *dst = (float*)malloc(lenDst * sizeof(float));
+    (*env)->GetFloatArrayRegion(env, cdfSrc, 0, lenSrc, src);
+    (*env)->GetFloatArrayRegion(env, cdfDst, 0, lenDst, dst);
+    conformer_mel_set_heq_cdf(src, dst, (int)nQuantiles);
+    free(src); free(dst);
 }
